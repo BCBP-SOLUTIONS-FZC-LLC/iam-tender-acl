@@ -1,0 +1,288 @@
+# Default values for iam-tender-acl.
+# Deployment topology: stateless HTTP API (TAC-1..4) + an in-process SQS
+# consumer for TenantOffboarded, both running in the same pod/binary
+# (cmd/tender-acl). No CronJobs, no reconciler binary, no events published
+# (TAC-EVT-1, TAC-D5).
+
+replicaCount: 2
+
+image:
+  repository: ghcr.io/bcbp-solutions-fzc-llc/iam-tender-acl
+  pullPolicy: IfNotPresent
+  tag: ""  # overridden by CI to the git SHA; falls back to Chart.appVersion
+
+imagePullSecrets: []
+
+nameOverride: ""
+fullnameOverride: ""
+
+serviceAccount:
+  create: true
+  name: ""
+  # Annotations added to the ServiceAccount — use for IRSA on EKS:
+  #   eks.amazonaws.com/role-arn: arn:aws:iam::ACCOUNT_ID:role/iam-tender-acl
+  # See deploy/iam/ for the reference IAM policy this role needs (SQS
+  # consume on tenant-lifecycle-tenderacl-q only — no SNS, no S3, no KMS).
+  annotations: {}
+
+service:
+  type: ClusterIP
+  httpPort: 8080
+  metricsPort: 9090
+
+# HPA — CPU/memory always on; RPS-based scaling is optional (see hpa.yaml)
+# and requires prometheus-adapter configured with
+# deploy/monitoring/prometheus-adapter-rule.yaml. Without it, HPA silently
+# falls back to CPU/memory only.
+autoscaling:
+  enabled: true
+  minReplicas: 2
+  maxReplicas: 10
+  targetCPUUtilizationPercentage: 70
+  targetMemoryUtilizationPercentage: 80
+  targetRPSPerReplica: 0  # set > 0 (e.g. 300) to enable RPS-based scaling
+
+resources:
+  requests:
+    cpu: 250m
+    memory: 256Mi
+  limits:
+    cpu: "1"
+    memory: 512Mi
+
+# Non-secret env, rendered directly onto the container (see
+# templates/deployment.yaml) — mirrors .env.example. Anything with a
+# credential (DATABASE_URL, VALKEY_PASSWORD) lives in envFromSecret below.
+env:
+  LOG_LEVEL: "info"
+  ENVIRONMENT: "production"
+  HTTP_PORT: "8080"
+  METRICS_PORT: "9090"
+
+  # Valkey address is not secret; the password (if any) is (see
+  # envFromSecret). No auth token is ever embedded in this URL form. The
+  # only cache region is tac:acl:{tenant}:{tender}:{user}, a fixed 30s TTL
+  # (LLD §9, hardcoded — not independently configurable via env var).
+  VALKEY_ADDR: "valkey.tender-acl.svc.cluster.local:6379"
+
+  # The one synchronous outbound dependency (LLD §6.3, §7.6.2): a
+  # grant-time-only, fail-closed membership-existence check against
+  # iam-org-membership's new internal provider endpoint (see
+  # O_AND_M_DELTA.md). ≤50ms p99 expected latency; 300ms hard client
+  # timeout (LLD §15) — these are deliberately different numbers, do not
+  # conflate them.
+  CORE_INTERNAL_BASE_URL: "http://org-membership.iam.svc.cluster.local"
+  MEMBERSHIP_CHECK_TIMEOUT_MS: "300"
+
+  # AWS SQS — TenantOffboarded consumer (receive-only; this service
+  # publishes zero events, so there is no SNS topic to configure).
+  SQS_QUEUE_URL: ""
+  SQS_DLQ_URL: ""
+  # ADR-0007 Wave 3 Phase 3 (O_AND_M_DELTA.md §5 Option B) — the per-user-
+  # removal ACL cascade, a second/independent SQS subscription from the
+  # tenant-offboarding one above (separate queue/DLQ, not a discriminated
+  # payload on the same queue — see MemberRemovalConsumer's doc comment).
+  MEMBER_REMOVAL_SQS_QUEUE_URL: ""
+  MEMBER_REMOVAL_SQS_DLQ_URL: ""
+  AWS_REGION: "us-east-1"
+  CONSUMER_CONCURRENCY: "4"
+
+  # OpenTelemetry. otlptracehttp — HTTP, not gRPC — so the collector
+  # endpoint's default port is 4318, not 4317.
+  OTEL_EXPORTER_OTLP_ENDPOINT: "http://otel-collector.observability.svc.cluster.local:4318"
+
+  # Docs surface (optional). Swagger UI is always mounted outside
+  # production; DOCS_ENABLED opts it into production too, and
+  # DOCS_AUTH_TOKEN (envFromSecret below) additionally bearer-auth-gates it
+  # there. Mirrors iam-org-membership's identical DocsConfig.
+  DOCS_ENABLED: "false"
+
+# Env vars whose value comes from a Kubernetes Secret. Keys must be present
+# in either .Values.existingSecret or .Values.secretValues.
+envFromSecret:
+  - DATABASE_URL
+  - MIGRATION_DATABASE_URL
+  - VALKEY_PASSWORD
+  - DOCS_AUTH_TOKEN
+
+# existingSecret — preferred for production.
+# Set to the name of a pre-existing Kubernetes Secret whose keys match
+# envFromSecret. When set, the chart will NOT create a Secret resource and
+# secretValues is ignored. Use with External Secrets Operator, AWS Secrets
+# Manager CSI, or Sealed Secrets:
+#   existingSecret: "tender-acl-secrets"
+#
+# DATABASE_URL here MUST be the runtime app role (tender_acl_app), which
+# has no BYPASSRLS. MIGRATION_DATABASE_URL MUST be the BYPASSRLS
+# tender_acl_migrator role — the pod applies migrations itself at startup
+# (cmd/tender-acl/migrate.go, LLD §7.4, additive-only for rolling-deploy
+# safety); there is no separate migrate Job in this chart.
+existingSecret: ""
+
+# rotationEpoch — used only when existingSecret is set. Bump this value to
+# trigger a rolling restart after an external secret is rotated:
+#   helm upgrade ... --set rotationEpoch=$(date +%s)
+rotationEpoch: "0"
+
+# Secret values — used ONLY when existingSecret is empty.
+# Pass via --set or a Helm secrets plugin (never commit real values).
+# Warning: Helm stores these in the release history Secret (base64, not
+# encrypted). In production, always prefer existingSecret over this map.
+secretValues:
+  DATABASE_URL: ""
+  MIGRATION_DATABASE_URL: ""
+  VALKEY_PASSWORD: ""
+  DOCS_AUTH_TOKEN: ""
+
+# 30s HTTP+metrics server graceful shutdown budget (cmd/tender-acl/main.go
+# gives httpServer.Shutdown/metricsServer.Shutdown a 10s context each,
+# sequentially) + buffer for the SQS consumer to finish in-flight messages.
+terminationGracePeriodSeconds: 30
+
+# podDisruptionBudget — ensures at least 1 pod survives voluntary
+# disruptions (node drains, cluster upgrades). With minReplicas: 2 we keep
+# minAvailable=1 so a single node drain doesn't take the service to zero.
+podDisruptionBudget:
+  enabled: true
+  minAvailable: 1
+
+podAnnotations: {}
+podLabels: {}
+
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 65532      # distroless nonroot UID
+  runAsGroup: 65532
+  fsGroup: 65532
+  seccompProfile:
+    type: RuntimeDefault
+
+securityContext:
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true
+  capabilities:
+    drop:
+      - ALL
+
+nodeSelector: {}
+tolerations: []
+
+# startupProbe covers a slow cold start (Postgres pool warmup, AWS SDK
+# config resolution) before liveness/readiness take over. failureThreshold *
+# periodSeconds = 60s maximum startup budget.
+startupProbe:
+  httpGet:
+    path: /healthz
+    port: http
+  initialDelaySeconds: 2
+  periodSeconds: 5
+  failureThreshold: 12   # 12 x 5s = 60s startup budget
+  timeoutSeconds: 3
+
+livenessProbe:
+  httpGet:
+    path: /healthz
+    port: http
+  initialDelaySeconds: 0  # startupProbe handles the initial delay
+  periodSeconds: 15
+  failureThreshold: 3
+  timeoutSeconds: 3
+
+readinessProbe:
+  httpGet:
+    path: /readyz
+    port: http
+  initialDelaySeconds: 0
+  periodSeconds: 10
+  failureThreshold: 3
+  timeoutSeconds: 3
+
+# NetworkPolicy — enabled by default. Restricts /api/v1 (TAC-1..3) and
+# /internal (TAC-4) traffic to the gateway namespace and same-namespace
+# callers, and /metrics to the monitoring namespace only. Egress permits
+# Postgres/Valkey/iam-org-membership (the membershipcheck dependency)/
+# AWS(443, SQS)/OTel via cluster DNS.
+networkPolicy:
+  enabled: true
+  ingressControllerNamespaceSelector:
+    kubernetes.io/metadata.name: envoy-gateway-system
+  ingressControllerPodSelector: {}
+  metricsIngress:
+    enabled: true
+    namespaceSelector:
+      kubernetes.io/metadata.name: monitoring
+    podSelector:
+      app.kubernetes.io/name: prometheus
+  additionalIngressRules: []
+  additionalEgressRules: []
+
+# ServiceMonitor — requires kube-prometheus-stack (monitoring.coreos.com/v1
+# CRD). Enable to have Prometheus auto-discover and scrape :9090/metrics.
+# NOTE: PrometheusRule (alerting rules) is also gated on this flag — no
+# scrape means no metrics, which means every alert stays permanently
+# inactive. Set to true (and add the correct serviceMonitorSelector labels)
+# before relying on any alert in deploy/monitoring/ or
+# deploy/helm/templates/prometheusrule.yaml.
+serviceMonitor:
+  enabled: true
+  interval: "30s"
+  scrapeTimeout: "10s"
+  additionalLabels: {}
+  relabelings: []
+  namespaceSelector: {}
+
+# Ingress — disabled by default. This service is normally reached only by
+# other in-cluster services (the internal TAC-4 route) and a tenant-admin
+# UI/BFF (the public TAC-1..3 routes) via the gateway; enable only if
+# those callers are outside the cluster.
+# type: HTTPRoute  — Envoy Gateway / any Gateway API-compatible controller (recommended)
+# type: Ingress    — classic nginx / traefik Ingress controller
+ingress:
+  enabled: false
+  type: HTTPRoute
+
+  hosts:
+    - host: tender-acl.internal.example.com
+      paths:
+        - path: /api/v1
+          pathType: PathPrefix
+
+  # Gateway API (type: HTTPRoute) — reference the Gateway resource that
+  # Envoy Gateway manages. Deploy the Gateway separately.
+  gateway:
+    name: ""              # required — name of the Gateway resource
+    namespace: ""         # optional — defaults to the release namespace
+    sectionName: ""       # optional — target a specific listener (e.g. "https")
+
+  # Envoy Gateway SecurityPolicy — CORS and gateway-level rate limiting.
+  # Requires gateway.envoyproxy.io/v1alpha1 CRD (Envoy Gateway v0.6+).
+  securityPolicy:
+    enabled: false
+    cors:
+      enabled: false
+      allowOrigins: []
+      allowMethods:
+        - GET
+        - POST
+        - DELETE
+        - OPTIONS
+      allowHeaders:
+        - Authorization
+        - Content-Type
+        - X-Tenant-Id
+        - X-User-Id
+        - X-User-Roles
+      maxAge: "86400"
+    rateLimit:
+      enabled: false
+      requestsPerUnit: 1000
+      unit: Second          # Second | Minute | Hour
+
+  # Classic Ingress (type: Ingress)
+  className: ""
+  annotations: {}
+    # cert-manager.io/cluster-issuer: letsencrypt-prod
+  tls: []
+  #  - secretName: tender-acl-tls
+  #    hosts:
+  #      - tender-acl.internal.example.com

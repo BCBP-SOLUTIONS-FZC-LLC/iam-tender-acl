@@ -1,0 +1,339 @@
+asyncapi: 3.0.0
+info:
+  title: Tender ACL Service — Events
+  version: 1.0.0
+  description: |
+    Event contract for the Tender ACL Service.
+
+    This service is **receive-only** on the event bus: it consumes exactly
+    two event types — `TenantOffboarded` and `TenantMembershipRemoved`
+    (ADR-0007 Wave 3 Phase 3, added after this document's original
+    version; see O_AND_M_DELTA.md §5 Option B) — and publishes **zero**
+    events (TAC-EVT-1, TAC-D5). There is no outbox table and no
+    SNS/EventBridge producer in this service — its entire event-driven
+    footprint is the two consumer operations defined below, each on its
+    own independent queue/DLQ pair.
+
+    No ACL grant/revoke event exists in this service's event catalogue —
+    this mirrors the source `iam-org-membership` behavior exactly (see
+    LLD §10.2, §3): the only event ever associated with the `tender_acl`
+    domain in the wider system is `TenderAssigneeOverridden`, which is
+    unrelated to `tender_acl_entries` (it is emitted by a different write
+    path, the tender assignee-override feature) and stays behind in
+    `iam-org-membership`. This extraction adds no new event.
+
+    ## Consumer behavior
+
+    On receipt of a `TenantOffboarded` event, the service:
+
+      1. Deletes all rows scoped to the event's `tenant_id` from
+         `tender_acl_entries` (LLD §7.6.4, §11.4 — replaces the
+         `fk_tae_tenant ON DELETE CASCADE` foreign key that could not
+         survive the database split).
+      2. Records the event's `event_id` in a `processed_events` table
+         (8-day retention) to guarantee idempotent, dedup-safe processing
+         if the same event is redelivered.
+
+    This consumption is the **only** event-driven behavior in the
+    service — no other inbound event types are handled, and no outbound
+    events are ever published. A delayed or failed cascade is never a
+    live authorization risk (TAC-EVT-4): a departed tenant's users have
+    no active membership, so I-8 (AuthZ Enrichment) never issues them
+    headers, and they can never reach TAC-4 regardless of whether their
+    stale ACL rows have been cleaned up yet.
+  x-consumer-behavior:
+    TenantOffboarded:
+      on_receipt:
+        - "Delete all rows scoped to tenant_id from tender_acl_entries"
+        - "Record event_id in processed_events (8-day retention) for idempotency/dedup"
+      publishes_events: false
+      note: >-
+        The service never publishes any event, under any circumstance (no
+        outbox, no SNS/EventBridge producer). No ACL grant/revoke event
+        exists or is added by this extraction (TAC-EVT-1, TAC-D5).
+    TenantMembershipRemoved:
+      on_receipt:
+        - "Soft-delete (set deleted_at) rows scoped to (tenant_id, user_id) from tender_acl_entries"
+        - "Record event_id in processed_events (8-day retention, consumer=member_removal) for idempotency/dedup"
+      publishes_events: false
+      note: >-
+        ADR-0007 Wave 3 Phase 3 (O_AND_M_DELTA.md §5 Option B) — replaces
+        the same-transaction SoftDeleteForUser call
+        iam-org-membership's MembershipService.RemoveUser used to make
+        before tender_acl_entries moved to its own database. Independent
+        queue/DLQ/processed_events-consumer-name from TenantOffboarded
+        above, so the two cascades' failure modes stay separately
+        observable.
+
+defaultContentType: application/json
+
+servers:
+  tenantLifecycleQueue:
+    host: sqs.amazonaws.com
+    protocol: sqs
+    description: >-
+      AWS SQS queue `tenant-lifecycle-tenderacl-q`, consumed by this
+      service. A companion dead-letter queue,
+      `tenant-lifecycle-tenderacl-q-dlq`, receives messages after
+      `maxReceiveCount=5` failed processing attempts and retains them for
+      8 days. Both queues are reachable only internally (VPC endpoint /
+      mesh-restricted; no public internet access).
+    bindings:
+      sqs:
+        queueUrl: "https://sqs.us-east-1.amazonaws.com/000000000000/tenant-lifecycle-tenderacl-q"
+
+  memberRemovalQueue:
+    host: sqs.amazonaws.com
+    protocol: sqs
+    description: >-
+      AWS SQS queue `member-removal-tenderacl-q` (ADR-0007 Wave 3 Phase 3),
+      consumed by this service. A companion dead-letter queue,
+      `member-removal-tenderacl-q-dlq`, receives messages after
+      `maxReceiveCount=5` failed processing attempts and retains them for
+      8 days. Independent from tenantLifecycleQueue above — a separate
+      queue, not a discriminated payload on the same one, so each
+      cascade's failure mode stays independently observable.
+    bindings:
+      sqs:
+        queueUrl: "https://sqs.us-east-1.amazonaws.com/000000000000/member-removal-tenderacl-q"
+
+channels:
+  tenant-lifecycle-tenderacl-q:
+    address: tenant-lifecycle-tenderacl-q
+    title: Tenant lifecycle events (tender-acl consumer)
+    description: >-
+      Inbound-only channel over which this service receives tenant
+      lifecycle events. Currently carries exactly one message type,
+      `TenantOffboarded`.
+    servers:
+      - $ref: "#/servers/tenantLifecycleQueue"
+    messages:
+      TenantOffboarded:
+        $ref: "#/components/messages/TenantOffboarded"
+    bindings:
+      sqs:
+        queue:
+          name: tenant-lifecycle-tenderacl-q
+          fifoQueue: false
+        deadLetterQueue:
+          name: tenant-lifecycle-tenderacl-q-dlq
+          maxReceiveCount: 5
+          retentionPeriodSeconds: 691200
+
+  member-removal-tenderacl-q:
+    address: member-removal-tenderacl-q
+    title: Member removal events (tender-acl consumer) — ADR-0007 Wave 3 Phase 3
+    description: >-
+      Inbound-only channel over which this service receives per-user-
+      removal events. Carries exactly one message type,
+      `TenantMembershipRemoved`.
+    servers:
+      - $ref: "#/servers/memberRemovalQueue"
+    messages:
+      TenantMembershipRemoved:
+        $ref: "#/components/messages/TenantMembershipRemoved"
+    bindings:
+      sqs:
+        queue:
+          name: member-removal-tenderacl-q
+          fifoQueue: false
+        deadLetterQueue:
+          name: member-removal-tenderacl-q-dlq
+          maxReceiveCount: 5
+          retentionPeriodSeconds: 691200
+
+operations:
+  receiveTenantOffboarded:
+    action: receive
+    channel:
+      $ref: "#/channels/tenant-lifecycle-tenderacl-q"
+    title: Receive TenantOffboarded
+    summary: Consume a TenantOffboarded event and cascade-delete the tenant's tender ACL entries.
+    description: >-
+      Receives a `TenantOffboarded` event from
+      `tenant-lifecycle-tenderacl-q` and, if `event_id` has not already
+      been recorded in `processed_events`, deletes every row scoped to the
+      event's `tenant_id` from `tender_acl_entries`, then records the
+      `event_id` in `processed_events` for idempotency. There are no
+      `send` operations anywhere in this document (TAC-EVT-5).
+    messages:
+      - $ref: "#/channels/tenant-lifecycle-tenderacl-q/messages/TenantOffboarded"
+
+  receiveTenantMembershipRemoved:
+    action: receive
+    channel:
+      $ref: "#/channels/member-removal-tenderacl-q"
+    title: Receive TenantMembershipRemoved
+    summary: Consume a TenantMembershipRemoved event and soft-delete that user's tender ACL entries.
+    description: >-
+      Receives a `TenantMembershipRemoved` event from
+      `member-removal-tenderacl-q` and, if `id` has not already been
+      recorded in `processed_events` (under consumer name
+      `member_removal`), soft-deletes every row scoped to the event's
+      `(tenant_id, subject)` tuple from `tender_acl_entries`, then records
+      the event id in `processed_events` for idempotency (ADR-0007 Wave 3
+      Phase 3). There are no `send` operations anywhere in this document
+      (TAC-EVT-5).
+    messages:
+      - $ref: "#/channels/member-removal-tenderacl-q/messages/TenantMembershipRemoved"
+
+components:
+  messages:
+    TenantOffboarded:
+      name: TenantOffboarded
+      title: Tenant Offboarded
+      summary: A tenant has been offboarded and all of its data must be purged.
+      contentType: application/json
+      payload:
+        $ref: "#/components/schemas/TenantOffboardedPayload"
+      examples:
+        - name: TenantOffboardedExample
+          summary: A typical TenantOffboarded event payload.
+          payload:
+            event_id: "d290f1ee-6c54-4b01-90e6-d701748f0851"
+            event_type: "TenantOffboarded"
+            tenant_id: "a0f2a3c4-1111-4a2b-9c3d-000000000000"
+            occurred_at: "2026-08-14T03:15:00Z"
+      x-consumer-schema-dependency:
+        # This service is a pure CONSUMER of TenantOffboarded — it does not
+        # own, version, or register this schema. There is no Glue Schema
+        # Registry integration here (no platform-schemagov, no GlueCodec,
+        # per LLD §10.4 — explicit, documented exemption): SQS delivers
+        # plain JSON and the consumer decodes it directly. This block
+        # exists only to make our dependency on the PRODUCER's
+        # (iam-org-membership's) schema shape explicit, since we have no
+        # tooling that would otherwise catch a breaking upstream change.
+        depends-on-shape:
+          event_id: uuid
+          event_type: "TenantOffboarded (const)"
+          tenant_id: uuid
+          occurred_at: date-time
+        producer-lifecycle-status: unknown
+        # We don't control the producer's x-lifecycle state and have no
+        # automated visibility into it. If the producer ever deprecates
+        # TenantOffboarded in favor of a replacement event (e.g.
+        # TenantOffboarded.v2), this service needs a NEW consumer for that
+        # event type before the producer's retire-after deadline — see
+        # ARCHITECTURE.md § Event consumer flow. Track any such notice as
+        # a project memory / ticket the moment the producer team announces
+        # it; there is no CI check that will surface it automatically.
+
+    TenantMembershipRemoved:
+      name: TenantMembershipRemoved
+      title: Tenant Membership Removed
+      summary: A user's tenant membership has been removed; their tender ACL entries in this tenant must be soft-deleted.
+      contentType: application/json
+      payload:
+        $ref: "#/components/schemas/TenantMembershipRemovedEnvelope"
+      examples:
+        - name: TenantMembershipRemovedExample
+          summary: A typical TenantMembershipRemoved event envelope.
+          payload:
+            id: "e19a1c02-2222-4b3c-8d4e-000000000001"
+            type: "TenantMembershipRemoved"
+            tenant_id: "a0f2a3c4-1111-4a2b-9c3d-000000000000"
+            subject: "9c8b7a6f-3333-4c5d-9e6f-000000000002"
+            time: "2026-08-17T10:00:00Z"
+      x-consumer-schema-dependency:
+        # Same posture as TenantOffboarded above: this service is a pure
+        # CONSUMER, no Glue Schema Registry integration (LLD §10.4-style
+        # exemption, extended to this new event by ADR-0007 Wave 3 Phase
+        # 3). depends-on-shape reflects platform-events' actual
+        # Envelope[T] wire fields (id/type/tenant_id/subject/time), unlike
+        # TenantOffboardedPayload above (which predates this document's
+        # confirmation of the real envelope shape against the published
+        # platform-events library — see IMPLEMENTATION_GAP_ANALYSIS.md for
+        # that reconciliation note).
+        depends-on-shape:
+          id: uuid
+          type: "TenantMembershipRemoved (const)"
+          tenant_id: uuid
+          subject: "uuid (the removed user's id)"
+          time: date-time
+        producer-lifecycle-status: unknown
+
+  schemas:
+    TenantOffboardedPayload:
+      type: object
+      description: Payload of the TenantOffboarded event.
+      required:
+        - event_id
+        - event_type
+        - tenant_id
+        - occurred_at
+      properties:
+        event_id:
+          type: string
+          format: uuid
+          description: >-
+            Unique identifier of this event occurrence. Used as the
+            idempotency/dedup key against the `processed_events` table
+            (8-day retention); redelivery of an event with an already-seen
+            `event_id` is a no-op.
+          examples: ["d290f1ee-6c54-4b01-90e6-d701748f0851"]
+        event_type:
+          type: string
+          const: TenantOffboarded
+          description: Discriminator identifying this event type.
+        tenant_id:
+          type: string
+          format: uuid
+          description: >-
+            Identifier of the tenant being offboarded. All rows scoped to
+            this tenant id in tender_acl_entries are deleted on receipt of
+            this event.
+          examples: ["a0f2a3c4-1111-4a2b-9c3d-000000000000"]
+        occurred_at:
+          type: string
+          format: date-time
+          description: Timestamp at which the offboarding occurred, as recorded by the publishing service.
+          examples: ["2026-08-14T03:15:00Z"]
+      additionalProperties: false
+
+    TenantMembershipRemovedEnvelope:
+      type: object
+      description: >-
+        Payload of the TenantMembershipRemoved event — this is
+        platform-events' Envelope[T] wire shape directly (fields the
+        producer/library define), not a service-specific data payload
+        (ADR-0007 Wave 3 Phase 3).
+      required:
+        - id
+        - type
+        - tenant_id
+        - subject
+        - time
+      properties:
+        id:
+          type: string
+          format: uuid
+          description: >-
+            Unique identifier of this event occurrence. Used as the
+            idempotency/dedup key against the `processed_events` table
+            (8-day retention, consumer=member_removal); redelivery of an
+            event with an already-seen `id` is a no-op.
+          examples: ["e19a1c02-2222-4b3c-8d4e-000000000001"]
+        type:
+          type: string
+          const: TenantMembershipRemoved
+          description: Discriminator identifying this event type.
+        tenant_id:
+          type: string
+          format: uuid
+          description: >-
+            Identifier of the tenant the removed membership belonged to.
+          examples: ["a0f2a3c4-1111-4a2b-9c3d-000000000000"]
+        subject:
+          type: string
+          format: uuid
+          description: >-
+            The removed user's id. Together with tenant_id, scopes the
+            soft-delete of tender_acl_entries rows on receipt of this
+            event.
+          examples: ["9c8b7a6f-3333-4c5d-9e6f-000000000002"]
+        time:
+          type: string
+          format: date-time
+          description: Timestamp at which the membership removal occurred, as recorded by the publishing service.
+          examples: ["2026-08-17T10:00:00Z"]
+      additionalProperties: true

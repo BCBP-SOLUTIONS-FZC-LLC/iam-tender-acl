@@ -1,0 +1,120 @@
+# Reusable workflow — test gate.
+# Race detector (unit · integration · rls) + coverage + arch lint. Called
+# by ci.yml and release.yml. Gates trivy and smoke.
+name: Validate / Test
+
+"on":
+  workflow_call:
+    inputs:
+      ref:
+        description: 'Git ref to check out (leave empty to use the caller ref)'
+        type: string
+        required: false
+        default: ''
+    outputs:
+      pct:
+        description: 'Total statement coverage percentage'
+        value: ${{ jobs.test.outputs.pct }}
+
+permissions:
+  contents: read
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: 'true'
+  # 70% is a starting baseline (see .github/scripts/coverage-gate.sh) — not
+  # the aspiration a more mature sibling service holds itself to, and this
+  # service is explicitly interim (ADR-0007 Wave 3 / TAC-D1). Ratchet this
+  # up over time; never lower it to make a failing PR pass.
+  COVERAGE_THRESHOLD: '70'
+
+jobs:
+  test:
+    name: test
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    outputs:
+      pct: ${{ steps.gate.outputs.pct }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7.0.0
+        with:
+          ref: ${{ inputs.ref || github.ref }}
+          persist-credentials: false
+          token: ${{ secrets.CI_REPO_READ_TOKEN || github.token }}
+
+      - name: Set up Go
+        uses: actions/setup-go@v6.5.0
+        with:
+          go-version-file: go.mod
+          cache-dependency-path: |
+            go.sum
+            go.mod
+
+      - name: Configure private module access
+        run: |
+          git config --global credential.helper store
+          echo "https://x-access-token:${{ secrets.GO_PRIVATE_TOKEN }}@github.com" > ~/.git-credentials
+          chmod 600 ~/.git-credentials
+
+      - name: Download modules
+        env:
+          GOPRIVATE: github.com/BCBP-SOLUTIONS-FZC-LLC/*
+          GONOSUMDB: github.com/BCBP-SOLUTIONS-FZC-LLC/*
+        run: go mod download
+
+      - name: Verify modules
+        run: go mod verify
+
+      # Mandatory blocking gate: runs unit + integration (Testcontainers
+      # Postgres+Valkey+SQS-compatible container) + rls (Testcontainers
+      # Postgres) with -race and coverage, in parallel, merged into
+      # coverage.out. Any data race detected here blocks all downstream jobs
+      # (trivy, smoke, push, release). Do NOT remove or skip.
+      - name: Tests — unit · integration · rls (race + coverage)
+        env:
+          TESTCONTAINERS_RYUK_DISABLED: 'true'
+        run: make test-ci
+
+      # make test-ci already merges the three coverage profiles into
+      # coverage.out via _merge-coverage. Assert the combined statement
+      # coverage meets COVERAGE_THRESHOLD.
+      - name: Coverage threshold gate
+        id: gate
+        run: bash .github/scripts/coverage-gate.sh
+
+      - name: Upload coverage report
+        uses: actions/upload-artifact@v7.0.1
+        if: always()
+        with:
+          name: coverage-report-${{ github.sha }}
+          path: coverage.out
+          if-no-files-found: ignore
+          retention-days: 30
+
+      # Enforces this service's Clean Architecture layering (defined in
+      # .go-arch-lint.yml): core/domain -> core/port -> core/service, with
+      # adapter/inbound and adapter/outbound depending only on core, never
+      # on each other — wired together only from cmd/tender-acl.
+      - name: Cache go-arch-lint binary
+        uses: actions/cache@v6.0.0
+        with:
+          path: ~/go/bin
+          key: go-arch-lint-${{ runner.os }}-v1.15.0
+
+      - name: Architecture lint
+        run: bash .github/scripts/arch-lint.sh
+
+      # Regenerates Swagger docs from handler annotations and fails if the
+      # committed artifacts (docs/swagger/) are stale — mirrors
+      # iam-org-membership's identical CI gate.
+      - name: Swagger staleness check
+        run: bash .github/scripts/check-swagger-stale.sh
+
+      # End-to-end tests are heavier (they exercise the full HTTP router
+      # against real Postgres+Valkey, plus the SQS consumer against a local
+      # SQS-compatible container) and are not part of the coverage gate,
+      # but they must still pass before anything downstream builds on this ref.
+      - name: End-to-end tests
+        env:
+          TESTCONTAINERS_RYUK_DISABLED: 'true'
+        run: make test-e2e

@@ -1,0 +1,48 @@
+graph LR
+    main(["cmd/tender-acl/main.go"])
+
+    domain(["internal/core/domain\n(TenderACLEntry, CachedAccess, domain.Error)"])
+    port(["internal/core/port\n(TenderACLRepository, MembershipCheckClient, Cache interfaces)"])
+    service(["internal/core/service\n(ACLService — business logic)"])
+    obs(["internal/adapter/outbound/metrics\n(cross-cutting OTel instruments)"])
+
+    httpadapter(["internal/adapter/inbound/http\n(handler + router + DTOs)"])
+    consumeradapter(["internal/adapter/inbound/consumer\n(OffboardingConsumer + MemberRemovalConsumer + ProcessedEvents)"])
+    postgres(["internal/adapter/outbound/postgres\n(TenderACLRepository impl)"])
+    valkey(["internal/adapter/outbound/valkey\n(Cache impl)"])
+    membershipcheck(["internal/adapter/outbound/membershipcheck\n(HTTPChecker impl)"])
+
+    main --> httpadapter
+    main --> consumeradapter
+    main --> postgres
+    main --> valkey
+    main --> membershipcheck
+    main --> service
+    main --> obs
+
+    %% Clean Architecture dependency rule: core packages depend only on
+    %% each other (domain <- port <- service); adapters depend on core,
+    %% never on each other. Enforced by .go-arch-lint.yml.
+    port    --> domain
+    service --> domain
+    service --> port
+
+    httpadapter --> service
+    httpadapter --> port
+    httpadapter --> domain
+    httpadapter --> obs
+
+    postgres        -->|"implements"| port
+    postgres        --> domain
+    valkey          -->|"implements"| port
+    valkey          --> domain
+    membershipcheck -->|"implements"| port
+
+    %% consumeradapter has ZERO import of postgres or the service package.
+    %% It declares its own minimal interfaces (CascadeDeleter,
+    %% IdempotencyStore, CascadeMetrics — narrow slices of
+    %% port.TenderACLRepository and obs's Metrics type) and main.go wires
+    %% the concrete adapters into them, satisfied purely by Go structural
+    %% typing — no import edge at all.
+    consumeradapter -.->|"structurally satisfied,\nwired only in main.go"| postgres
+    consumeradapter -.->|"structurally satisfied,\nwired only in main.go"| obs

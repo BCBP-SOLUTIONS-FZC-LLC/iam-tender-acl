@@ -1,0 +1,116 @@
+version: 3
+workdir: .
+
+allow:
+  depOnAnyVendor: true
+  # Deep-scan follows method calls through the composition root and flags every
+  # DI wire (e.g. cmd passing an outbound adapter to a service constructor) as
+  # a cross-layer dependency. That's how Clean Architecture is supposed to work
+  # in main.go — keep import-level checks only.
+  deepScan: false
+
+# Tests, dev scripts, and deploy manifests are not part of the runtime
+# architecture. Excluding them keeps the linter focused on production code.
+exclude:
+  - test
+  - scripts
+  - deploy
+
+excludeFiles:
+  - '.*_test\.go$'
+
+# Clean Architecture / Ports-and-Adapters layering (core/domain | core/port |
+# core/service, adapter/inbound | adapter/outbound), matching every sibling
+# IAM service (iam-org-membership, iam-catalog-admin, iam-group-mapping).
+# This supersedes the flat, deliberately unlayered structure this service
+# originally shipped with (tender-acl-service-lld.md §6, decision TAC-D1) —
+# see ARCHITECTURE.md's "Layer model" section for that history.
+components:
+  domain:
+    in: internal/core/domain
+
+  port:
+    in: internal/core/port
+
+  service:
+    in: internal/core/service
+
+  # Cross-cutting OpenTelemetry instruments. Imported by both the inbound
+  # HTTP router (request-count/duration) and the inbound SQS consumers
+  # (cascade counters) — mirrors iam-org-membership's identical
+  # "observability" component for the same reason (metrics span both
+  # inbound adapters, so it isn't purely an outbound concern).
+  observability:
+    in: internal/adapter/outbound/metrics
+
+  adapters_inbound:
+    in:
+      - internal/adapter/inbound/http
+      - internal/adapter/inbound/consumer
+
+  adapters_outbound:
+    in:
+      - internal/adapter/outbound/postgres
+      - internal/adapter/outbound/valkey
+      - internal/adapter/outbound/membershipcheck
+
+  # Generated Swagger docs — output of `make swag` (swaggo/swag). Declared
+  # as a component so arch-lint doesn't fail on the blank import in
+  # cmd/tender-acl/main.go — mirrors iam-org-membership's identical
+  # "docs_swagger" component.
+  docs_swagger:
+    in: docs/swagger
+
+  cmd:
+    in:
+      - cmd/tender-acl
+
+deps:
+  # domain: no internal imports at all — pure value types only.
+  domain:
+    anyVendorDeps: true
+
+  # port: only domain.
+  port:
+    mayDependOn:
+      - domain
+
+  # service: domain + port only.
+  service:
+    mayDependOn:
+      - domain
+      - port
+
+  # observability: instrumentation only.
+  observability:
+    anyVendorDeps: true
+
+  # inbound adapters: service + port + domain + observability.
+  adapters_inbound:
+    mayDependOn:
+      - service
+      - port
+      - domain
+      - observability
+
+  # outbound adapters: port + domain only — none of postgres/valkey/
+  # membershipcheck touch metrics.
+  adapters_outbound:
+    mayDependOn:
+      - port
+      - domain
+
+  # docs_swagger: pure generated assets, no internal deps.
+  docs_swagger:
+    anyVendorDeps: true
+
+  # composition root: wires everything.
+  cmd:
+    mayDependOn:
+      - domain
+      - port
+      - service
+      - observability
+      - adapters_inbound
+      - adapters_outbound
+      - docs_swagger

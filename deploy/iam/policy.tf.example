@@ -1,0 +1,68 @@
+# Terraform snippet — attach the reference policy in deploy/iam/policy.json to
+# an IRSA role. This file is *illustrative*, not applied by the application.
+# Platform Terraform owns the authoritative version of this resource.
+
+# 1. Trust policy — the ServiceAccount `iam-tender-acl` in namespace
+#    `tender-acl` assumes this role via IRSA.
+data "aws_iam_policy_document" "iam_tender_acl_trust" {
+  statement {
+    actions = ["sts:AssumeRoleWithWebIdentity"]
+    principals {
+      type        = "Federated"
+      identifiers = [aws_iam_openid_connect_provider.eks.arn]
+    }
+    condition {
+      test     = "StringEquals"
+      variable = "${replace(aws_iam_openid_connect_provider.eks.url, "https://", "")}:sub"
+      values   = ["system:serviceaccount:tender-acl:iam-tender-acl"]
+    }
+    condition {
+      test     = "StringEquals"
+      variable = "${replace(aws_iam_openid_connect_provider.eks.url, "https://", "")}:aud"
+      values   = ["sts.amazonaws.com"]
+    }
+  }
+}
+
+resource "aws_iam_role" "iam_tender_acl" {
+  name               = "iam-tender-acl"
+  assume_role_policy = data.aws_iam_policy_document.iam_tender_acl_trust.json
+}
+
+# 2. Permission policy — templated from deploy/iam/policy.json.
+#
+# Two SQS inbound queues (+ their DLQs, referenced only via each queue's
+# own redrive policy, not by any pod-level SQS action) — this matches the
+# receive-only consumer topology: iam-tender-acl publishes zero events
+# (TAC-EVT-1, TAC-D5), so there is no SNS topic, and there is no Glue
+# Schema Registry, S3, or KMS usage anywhere in this service. The grant-
+# time membership check (LLD §7.6.2) is a plain mesh-internal HTTP call to
+# iam-org-membership, not an AWS API call — it needs no IAM grant at all.
+# member_removal_tenderacl_queue_arn backs the per-user-removal ACL
+# cascade (ADR-0007 Wave 3 Phase 3, O_AND_M_DELTA.md §5 Option B) — a
+# second, independent queue from the tenant-offboarding one.
+resource "aws_iam_policy" "iam_tender_acl" {
+  name = "iam-tender-acl"
+  policy = templatefile("${path.module}/policy.json", {
+    tenant_lifecycle_tenderacl_queue_arn = aws_sqs_queue.tenant_lifecycle_tenderacl.arn
+    member_removal_tenderacl_queue_arn   = aws_sqs_queue.member_removal_tenderacl.arn
+
+    aws_region     = data.aws_region.current.name
+    aws_account_id = data.aws_caller_identity.current.account_id
+  })
+}
+
+resource "aws_iam_role_policy_attachment" "iam_tender_acl" {
+  role       = aws_iam_role.iam_tender_acl.name
+  policy_arn = aws_iam_policy.iam_tender_acl.arn
+}
+
+# ─────────────────────────────────────────────────────────────────────────
+# Each DLQ and its redrive policy (maxReceiveCount=5, 8-day retention) are
+# provisioned by platform Terraform alongside the corresponding source
+# queue. The pod role above intentionally has NO permissions on either
+# DLQ — redelivery routing is handled entirely by SQS's own redrive
+# policy, and manual DLQ inspection/redrive is an operator action
+# performed with a separate, more privileged role, not the running
+# service.
+# ─────────────────────────────────────────────────────────────────────────

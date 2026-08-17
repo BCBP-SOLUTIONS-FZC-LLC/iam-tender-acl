@@ -1,0 +1,319 @@
+definitions:
+  http.ACLResponse:
+    properties:
+      access_level:
+        type: string
+      created_at:
+        type: string
+      expires_at:
+        type: string
+      granted_by:
+        type: string
+      id:
+        type: string
+      reason:
+        type: string
+      record_version:
+        type: integer
+      tenant_id:
+        type: string
+      tender_id:
+        type: string
+      updated_at:
+        type: string
+      user_id:
+        type: string
+    type: object
+  http.CheckAccessResponse:
+    properties:
+      access_level:
+        type: string
+      expires_at:
+        type: string
+      has_access:
+        type: boolean
+    type: object
+  http.ErrorResponse:
+    properties:
+      error:
+        type: string
+      request_id:
+        type: string
+      status:
+        type: integer
+      trace_id:
+        type: string
+    type: object
+  http.GrantRequest:
+    properties:
+      access_level:
+        type: string
+      expires_at:
+        type: string
+      reason:
+        type: string
+      user_id:
+        type: string
+    required:
+    - access_level
+    - user_id
+    type: object
+  http.ListResponse:
+    properties:
+      entries:
+        items:
+          $ref: '#/definitions/http.ACLResponse'
+        type: array
+    type: object
+info:
+  contact:
+    name: BCBP Solutions
+  description: |-
+    Restricted-tender access overlay, extracted from iam-org-membership per ADR-0007 Wave 3. Owns exactly one resource — tender_acl_entries — behind three admin-gated grant/revoke/list endpoints and one mesh-only authorization check.
+
+    **Route prefixes.**  `/api/v1/*` — tenant-admin callers (`tender_admin`/`tenant_admin`/`tenant_owner`, via `x-tenant-roles`).  `/internal/*` — in-mesh service-to-service, mTLS trust boundary only, no RBAC/JWT check at all (LLD §8.2/§13.2).
+
+    TAC-4 (the internal check) never returns 404 — a missing grant is a valid, cacheable `has_access:false` answer, not an error.
+  license:
+    name: Proprietary
+  title: Tender ACL Service API
+  version: "1.0"
+paths:
+  /api/v1/tenants/{id}/tenders/{tender_id}/acl:
+    get:
+      description: Every active-or-not entry for a tender, ordered by created_at.
+        Not cached.
+      parameters:
+      - description: Tenant UUID
+        format: uuid
+        in: path
+        name: id
+        required: true
+        type: string
+      - description: Tender UUID
+        format: uuid
+        in: path
+        name: tender_id
+        required: true
+        type: string
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/http.ListResponse'
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/http.ErrorResponse'
+        "403":
+          description: Forbidden
+          schema:
+            $ref: '#/definitions/http.ErrorResponse'
+      security:
+      - UserID: []
+      - TenantID: []
+      - TenantRoles: []
+      summary: TAC-1 — List tender ACL entries
+      tags:
+      - public
+    post:
+      consumes:
+      - application/json
+      description: Blocks on a synchronous membership-existence check against iam-org-membership
+        — fails closed (503 core_unavailable) if that check can't be performed.
+      parameters:
+      - description: Tenant UUID
+        format: uuid
+        in: path
+        name: id
+        required: true
+        type: string
+      - description: Tender UUID
+        format: uuid
+        in: path
+        name: tender_id
+        required: true
+        type: string
+      - description: Grant request
+        in: body
+        name: body
+        required: true
+        schema:
+          $ref: '#/definitions/http.GrantRequest'
+      produces:
+      - application/json
+      responses:
+        "201":
+          description: Created
+          schema:
+            $ref: '#/definitions/http.ACLResponse'
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/http.ErrorResponse'
+        "401":
+          description: Unauthorized
+          schema:
+            $ref: '#/definitions/http.ErrorResponse'
+        "403":
+          description: Forbidden
+          schema:
+            $ref: '#/definitions/http.ErrorResponse'
+        "409":
+          description: Conflict
+          schema:
+            $ref: '#/definitions/http.ErrorResponse'
+        "422":
+          description: Unprocessable Entity
+          schema:
+            $ref: '#/definitions/http.ErrorResponse'
+        "503":
+          description: Service Unavailable
+          schema:
+            $ref: '#/definitions/http.ErrorResponse'
+      security:
+      - UserID: []
+      - TenantID: []
+      - TenantRoles: []
+      summary: TAC-2 — Grant a tender ACL entry
+      tags:
+      - public
+  /api/v1/tenants/{id}/tenders/{tender_id}/acl/{user_id}:
+    delete:
+      description: Soft-delete, idempotent in effect — revoking an already-revoked
+        (or never-granted) entry is not an error.
+      parameters:
+      - description: Tenant UUID
+        format: uuid
+        in: path
+        name: id
+        required: true
+        type: string
+      - description: Tender UUID
+        format: uuid
+        in: path
+        name: tender_id
+        required: true
+        type: string
+      - description: User UUID
+        format: uuid
+        in: path
+        name: user_id
+        required: true
+        type: string
+      responses:
+        "204":
+          description: No Content
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/http.ErrorResponse'
+        "403":
+          description: Forbidden
+          schema:
+            $ref: '#/definitions/http.ErrorResponse'
+      security:
+      - UserID: []
+      - TenantID: []
+      - TenantRoles: []
+      summary: TAC-3 — Revoke a tender ACL entry
+      tags:
+      - public
+  /healthz:
+    get:
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            additionalProperties:
+              type: string
+            type: object
+      summary: Liveness check
+      tags:
+      - infra
+  /internal/tenants/{id}/tenders/{tender_id}/acl/{user_id}:
+    get:
+      description: Mesh-only, no RBAC/JWT check at all. Never 404 — a missing grant
+        is a valid, cacheable has_access:false answer. Cached 30s in Valkey.
+      parameters:
+      - description: Tenant UUID
+        format: uuid
+        in: path
+        name: id
+        required: true
+        type: string
+      - description: Tender UUID
+        format: uuid
+        in: path
+        name: tender_id
+        required: true
+        type: string
+      - description: User UUID
+        format: uuid
+        in: path
+        name: user_id
+        required: true
+        type: string
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/http.CheckAccessResponse'
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/http.ErrorResponse'
+      summary: TAC-4 — Check tender access
+      tags:
+      - internal
+  /readyz:
+    get:
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            additionalProperties: true
+            type: object
+        "503":
+          description: Service Unavailable
+          schema:
+            additionalProperties: true
+            type: object
+      summary: Readiness check
+      tags:
+      - infra
+tags:
+- description: Tenant-admin grant/revoke/list (TAC-1, TAC-2, TAC-3)
+  name: public
+- description: Mesh-only authorization check (TAC-4/I-12) — no RBAC
+  name: internal
+- description: Health checks (unauthenticated)
+  name: infra
+securityDefinitions:
+  TenantID:
+    description: Tenant UUID injected by the API gateway. Must match the :id path
+      parameter (defense-in-depth alongside RLS) on /api/v1/* routes.
+    in: header
+    name: x-tenant-id
+    type: apiKey
+  TenantRoles:
+    description: Comma-separated tenant-role list injected by the API gateway. /api/v1/*
+      routes require tender_admin, tenant_admin, or tenant_owner.
+    in: header
+    name: x-tenant-roles
+    type: apiKey
+  UserID:
+    description: Authenticated user UUID injected by the API gateway. Required on
+      /api/v1/* routes only — /internal/* is mesh-only and carries no identity headers.
+    in: header
+    name: x-user-id
+    type: apiKey
+swagger: "2.0"

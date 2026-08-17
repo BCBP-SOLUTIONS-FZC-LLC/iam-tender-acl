@@ -1,0 +1,16 @@
+#!/usr/bin/env bash
+# Local commit gates: formatting, vet, and lint. Installed via
+# `make install-hooks` (or `make setup` on first checkout).
+set -euo pipefail
+
+echo "[pre-commit] running tidy..."
+make tidy
+
+echo "[pre-commit] running fmt-check..."
+make fmt-check
+
+echo "[pre-commit] running vet..."
+make vet
+
+echo "[pre-commit] running lint..."
+make lint

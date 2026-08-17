@@ -1,0 +1,44 @@
+iam-tender-acl {{ .Chart.Version }} deployed.
+
+This service is interim (ADR-0007 Option D — scheduled to merge into the
+Tender Service; see MIGRATION_RUNBOOK.md).
+
+━━ REQUIRED ACTIONS ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+{{ if not .Values.existingSecret -}}
+⚠  Credentials are stored in Helm release history (base64, not encrypted).
+   Migrate to External Secrets Operator or AWS Secrets Manager CSI:
+     existingSecret: "tender-acl-secrets"
+   Then remove secretValues from your values file.
+
+{{ end -}}
+{{ if not .Values.networkPolicy.enabled -}}
+⚠  networkPolicy.enabled is false. :9090/metrics is unauthenticated and
+   reachable by any pod in the cluster. Enable in production:
+     networkPolicy.enabled: true
+   Ensure the ingress controller namespace label matches:
+     ingressControllerNamespaceSelector: {{ .Values.networkPolicy.ingressControllerNamespaceSelector | toJson }}
+
+{{ end -}}
+{{ if .Values.ingress.enabled -}}
+⚠  Ingress is enabled. Only /api/v1 (TAC-1..3) is routed — the internal
+   TAC-4 authorization-check endpoint must never be exposed this way; it is
+   mTLS-only and reached solely via the service mesh. :9090/metrics is not
+   referenced by this Ingress, but remains reachable cluster-wide unless
+   networkPolicy.enabled=true.
+
+{{ end -}}
+{{ if eq (int .Values.autoscaling.targetRPSPerReplica) 0 -}}
+ℹ  autoscaling.targetRPSPerReplica is 0 — HPA is scaling on CPU/memory only.
+   To scale on request rate instead (recommended for this I/O-bound
+   service), set targetRPSPerReplica and apply
+   deploy/monitoring/prometheus-adapter-rule.yaml.
+
+{{ end -}}
+━━ VERIFY DEPLOYMENT ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  kubectl rollout status deployment/{{ include "tender-acl.fullname" . }} -n {{ .Release.Namespace }}
+  kubectl get pods -l {{ include "tender-acl.selectorLabels" . | replace ": " "=" | replace "\n" "," }}
+
+Readiness: https://{{ if .Values.ingress.hosts }}{{ (first .Values.ingress.hosts).host }}{{ else }}<host>{{ end }}/readyz
+Metrics:   (cluster-internal only) http://<pod-ip>:{{ .Values.service.metricsPort }}/metrics

@@ -1,0 +1,32 @@
+flowchart TD
+    subgraph keys["Cache Key Namespace  (Valkey)  —  the ONLY cache in this service (LLD §9)"]
+        k1["tac:acl:{tenant}:{tender}:{user}\n→ {has_access, access_level, expires_at}\nTTL: 30s, no jitter"]
+    end
+
+    subgraph check["TAC-4 — Internal Authorization Check  (GET /internal/.../acl/:user_id)"]
+        A1([mTLS-only caller, no role check]) --> A2{"tac:acl:{tenant}:{tender}:{user}\ncache hit?"}
+        A2 -- yes --> A3["Return cached {has_access, access_level, expires_at}\nNever 404, regardless of hit/miss"]
+        A2 -- no  --> A4["SELECT tender_acl_entries\nWHERE deleted_at IS NULL AND\n(expires_at IS NULL OR expires_at > now())"]
+        A4 --> A5["SET tac:acl:{tenant}:{tender}:{user}, TTL 30s"]
+        A5 --> A6["Return {has_access, access_level, expires_at}"]
+    end
+
+    subgraph list["TAC-1 — List  (GET .../acl, admin-gated)"]
+        L1([role-checked caller]) --> L2["Always reads live from Postgres\nNOT cached — low-frequency, admin-gated read"]
+    end
+
+    subgraph write["Write / Invalidation Path  (TAC-2 Grant, TAC-3 Revoke)"]
+        W1([Grant or Revoke, single-row WithTenantTx]) --> W2{Committed?}
+        W2 -- no → rollback --> W3[No cache operation\ntransaction/membership-check error returned]
+        W2 -- yes --> W4["DEL tac:acl:{tenant}:{tender}:{user}\nAFTER commit — deliberately DELETE not\nUPDATE, so a mid-write process death\nnever serves a stale write-through value"]
+        W4 --> W5["Failed DEL is logged, not fatal (TAC-FAIL-2)\nNext TAC-4 read past the 30s TTL\nre-populates from the source of truth regardless"]
+    end
+
+    subgraph offboard["Tenant Offboarding Cascade"]
+        O1([TenantOffboarded consumed]) --> O2["DELETE FROM tender_acl_entries\nWHERE tenant_id=$1"]
+        O2 --> O3["No cache invalidation performed here —\nany cached tac:acl:* entries for the\noffboarded tenant simply expire within 30s"]
+    end
+
+    note1["The 30s TTL is the entire staleness budget in this service.\nLLD §17.4 end-to-end chain: grant -> TAC-4 has_access:true (cached)\n-> revoke -> TAC-4 MAY still return the pre-revoke cached value until\nthe DEL lands or the 30s TTL expires, whichever is first — the DEL\nis synchronous with the revoke commit, so in practice this window is\nthe time between commit and the DEL call, not the full 30s."]
+
+    note2["Cache failure mode (TAC-FAIL-2): Valkey down -> TAC-4 falls\nthrough to Postgres on every call (degraded latency, not outage).\n/readyz reports cache degraded but the pod stays in service — writes\nproceed normally, a failed DEL is logged and swallowed."]

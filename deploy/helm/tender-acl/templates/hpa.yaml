@@ -1,0 +1,47 @@
+{{- if .Values.autoscaling.enabled }}
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: {{ include "tender-acl.fullname" . }}
+  labels:
+    {{- include "tender-acl.labels" . | nindent 4 }}
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: {{ include "tender-acl.fullname" . }}
+  minReplicas: {{ .Values.autoscaling.minReplicas }}
+  maxReplicas: {{ .Values.autoscaling.maxReplicas }}
+  metrics:
+    {{- if .Values.autoscaling.targetCPUUtilizationPercentage }}
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: {{ .Values.autoscaling.targetCPUUtilizationPercentage }}
+    {{- end }}
+    {{- if .Values.autoscaling.targetMemoryUtilizationPercentage }}
+    - type: Resource
+      resource:
+        name: memory
+        target:
+          type: Utilization
+          averageUtilization: {{ .Values.autoscaling.targetMemoryUtilizationPercentage }}
+    {{- end }}
+    {{- if .Values.autoscaling.targetRPSPerReplica }}
+    # RPS-based scaling: more accurate than CPU for this I/O-bound service
+    # (Postgres/Valkey/membershipcheck round trips dominate TAC-2 latency).
+    # PREREQUISITE: the prometheus-adapter must be installed and configured
+    # with the rule at deploy/monitoring/prometheus-adapter-rule.yaml.
+    # Without it this metric is silently absent from the custom metrics API
+    # and HPA falls back to CPU/memory only.
+    - type: Pods
+      pods:
+        metric:
+          name: tender_acl_requests_per_second
+        target:
+          type: AverageValue
+          averageValue: {{ .Values.autoscaling.targetRPSPerReplica }}
+    {{- end }}
+{{- end }}

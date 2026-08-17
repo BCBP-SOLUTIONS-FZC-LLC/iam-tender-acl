@@ -1,0 +1,191 @@
+{{- if .Values.serviceMonitor.enabled }}
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: {{ include "tender-acl.fullname" . }}
+  labels:
+    {{- include "tender-acl.labels" . | nindent 4 }}
+    {{- with .Values.serviceMonitor.additionalLabels }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+spec:
+  groups:
+    # ── Availability — LLD §14.5 "readyz fail >5min → SEV-2" ────────────────
+    - name: tender_acl_availability
+      rules:
+        - alert: TenderAclDown
+          expr: |
+            absent(up{job={{ include "tender-acl.fullname" . | quote }}} == 1)
+          for: 5m
+          labels:
+            severity: critical
+            team: platform
+          annotations:
+            summary: iam-tender-acl has no healthy/ready instances
+            description: >-
+              No tender-acl pods have been scraped as healthy for 5 minutes
+              (LLD §14.5 SEV-2: /readyz fail > 5min). Check pod readiness:
+              kubectl get pods -l app.kubernetes.io/name=tender-acl
+
+        - alert: TenderAclReplicasMissing
+          expr: |
+            sum(up{job={{ include "tender-acl.fullname" . | quote }}}) < 2
+          for: 5m
+          labels:
+            severity: warning
+            team: platform
+          annotations:
+            summary: iam-tender-acl running below minimum replica count
+            description: >-
+              Fewer than 2 replicas are healthy. HPA minReplicas is 2;
+              a further disruption will block node drains.
+              Current healthy count: {{ "{{ $value }}" }}.
+
+    # ── TAC-4 error rate — LLD §14.5 "TAC-4 error rate >10%/5min → SEV-2" ──
+    - name: tender_acl_errors
+      rules:
+        - alert: TenderAclTAC4HighErrorRate
+          expr: |
+            sum(rate(tender_acl_requests_total{job={{ include "tender-acl.fullname" . | quote }}, path=~".*/internal/.*acl.*", status=~"5.."}[5m]))
+              /
+            clamp_min(sum(rate(tender_acl_requests_total{job={{ include "tender-acl.fullname" . | quote }}, path=~".*/internal/.*acl.*"}[5m])), 0.001)
+            > 0.10
+          for: 5m
+          labels:
+            severity: critical
+            team: platform
+          annotations:
+            summary: TAC-4 (authorization check) 5xx error rate above 10%
+            description: >-
+              {{ "{{ $value | humanizePercentage }}" }} of TAC-4 requests are
+              returning 5xx errors over the last 5 minutes. TAC-4 is on a
+              live authorization decision path (Tender Service, AuthZ
+              Enrichment) — investigate immediately: own Postgres/Valkey
+              health, recent deploys, application logs.
+
+        - alert: TenderAclHighErrorRate
+          expr: |
+            sum(rate(tender_acl_requests_total{job={{ include "tender-acl.fullname" . | quote }}, status=~"5.."}[5m]))
+              /
+            clamp_min(sum(rate(tender_acl_requests_total{job={{ include "tender-acl.fullname" . | quote }}}[5m])), 0.001)
+            > 0.05
+          for: 5m
+          labels:
+            severity: warning
+            team: platform
+          annotations:
+            summary: iam-tender-acl overall 5xx error rate above 5%
+            description: >-
+              {{ "{{ $value | humanizePercentage }}" }} of all requests are
+              returning 5xx errors over the last 5 minutes.
+
+    # ── Grant-time membership-check dependency — LLD §14.5 "Core unreachable
+    #    during TAC-2 sustained >15min → SEV-3" ──────────────────────────────
+    - name: tender_acl_membershipcheck
+      rules:
+        - alert: TenderAclMembershipCheckUnavailable
+          # tender_acl_grant_checks_total{status="unavailable"} increments
+          # only when the synchronous membershipcheck call to
+          # iam-org-membership fails/times out (TAC-2, fail-closed —
+          # TAC-FAIL-1). A sustained non-zero rate means grants are being
+          # blocked, not that any authorization is silently wrong (TAC-4 is
+          # unaffected — TAC-FAIL-3).
+          expr: |
+            sum(rate(tender_acl_grant_checks_total{job={{ include "tender-acl.fullname" . | quote }}, status="unavailable"}[5m])) > 0
+          for: 15m
+          labels:
+            severity: warning
+            team: platform
+          annotations:
+            summary: iam-org-membership unreachable for TAC-2 grant-time membership checks
+            description: >-
+              The membershipcheck client has been failing/timing out for 15+
+              minutes (LLD §14.5 SEV-3). New ACL grants (TAC-2) are being
+              blocked with 503 core_unavailable — TAC-1/TAC-3/TAC-4 are
+              unaffected. Check iam-org-membership's health and the mesh
+              path between the two services.
+
+    # ── Tenant offboarding cascade + DLQ — LLD §14.5 "DLQ depth>0 → SEV-3" ─
+    - name: tender_acl_offboarding
+      rules:
+        - alert: TenderAclOffboardingCascadeFailing
+          # The offboarding cascade is idempotent and safe to retry, so a
+          # rising error rate means a persistent dependency failure, not
+          # transient contention. A delayed/failed cascade is never a live
+          # authz risk (TAC-EVT-4) — this is an operational, not security,
+          # alert.
+          expr: |
+            increase(tender_acl_tenant_offboarding_cascade_total{job={{ include "tender-acl.fullname" . | quote }}, result="error"}[30m]) > 0
+          for: 5m
+          labels:
+            severity: warning
+            team: platform
+          annotations:
+            summary: iam-tender-acl tenant offboarding cascade is failing
+            description: >-
+              One or more TenantOffboarded deliveries failed to complete the
+              cascade delete of tender_acl_entries. Since the idempotency
+              record is only written after success, the message stays on
+              tenant-lifecycle-tenderacl-q for redelivery — check consumer
+              logs for the underlying Postgres error, and watch for
+              messages approaching maxReceiveCount=5 (which routes to
+              tenant-lifecycle-tenderacl-q-dlq).
+
+        - alert: TenderAclOffboardingDLQGrowing
+          # Requires the sqs_exporter (or CloudWatch exporter) series
+          # aws_sqs_approximate_number_of_messages_visible; not emitted by
+          # this application itself.
+          expr: aws_sqs_approximate_number_of_messages_visible{queue_name="tenant-lifecycle-tenderacl-q-dlq"} > 0
+          for: 5m
+          labels:
+            severity: warning
+            team: platform
+          annotations:
+            summary: tenant-lifecycle-tenderacl-q-dlq has messages
+            description: >-
+              {{ "{{ $value }}" }} message(s) on the dead-letter queue
+              (LLD §14.5 SEV-3). Each one is a TenantOffboarded delivery
+              that failed 5 consecutive processing attempts. Inspect the
+              DLQ payloads and, once the underlying issue is fixed, redrive
+              them back to tenant-lifecycle-tenderacl-q.
+
+    # ── Per-user-removal ACL cascade + DLQ — ADR-0007 Wave 3 Phase 3 ───────
+    - name: tender_acl_member_removal
+      rules:
+        - alert: TenderAclMemberRemovalCascadeFailing
+          # Same reasoning as TenderAclOffboardingCascadeFailing: idempotent,
+          # safe to retry, and a delayed/failed cascade is never a live authz
+          # risk (a removed user can't present valid gateway-injected
+          # headers again regardless).
+          expr: |
+            increase(tender_acl_member_removal_cascade_total{job={{ include "tender-acl.fullname" . | quote }}, result="error"}[30m]) > 0
+          for: 5m
+          labels:
+            severity: warning
+            team: platform
+          annotations:
+            summary: iam-tender-acl member removal ACL cascade is failing
+            description: >-
+              One or more TenantMembershipRemoved deliveries failed to
+              complete the soft-delete of that user's tender_acl_entries
+              rows. Since the idempotency record is only written after
+              success, the message stays on member-removal-tenderacl-q for
+              redelivery — check consumer logs for the underlying Postgres
+              error, and watch for messages approaching maxReceiveCount=5
+              (which routes to member-removal-tenderacl-q-dlq).
+
+        - alert: TenderAclMemberRemovalDLQGrowing
+          expr: aws_sqs_approximate_number_of_messages_visible{queue_name="member-removal-tenderacl-q-dlq"} > 0
+          for: 5m
+          labels:
+            severity: warning
+            team: platform
+          annotations:
+            summary: member-removal-tenderacl-q-dlq has messages
+            description: >-
+              {{ "{{ $value }}" }} message(s) on the dead-letter queue.
+              Each one is a TenantMembershipRemoved delivery that failed 5
+              consecutive processing attempts. Inspect the DLQ payloads
+              and, once the underlying issue is fixed, redrive them back to
+              member-removal-tenderacl-q.
+{{- end }}

@@ -1,0 +1,15 @@
+apiVersion: v2
+name: tender-acl
+description: Tender ACL overlay service (tender_acl_entries) for the IAM stack — extracted from iam-org-membership per ADR-0007 Wave 3, interim pending Wave 4 merge into the Tender Service
+type: application
+version: 0.1.0
+appVersion: "1.0.0"
+keywords:
+  - iam
+  - tender-acl
+  - authorization
+home: https://github.com/BCBP-SOLUTIONS-FZC-LLC/iam-tender-acl
+sources:
+  - https://github.com/BCBP-SOLUTIONS-FZC-LLC/iam-tender-acl
+maintainers:
+  - name: BCBP Solutions IAM Team

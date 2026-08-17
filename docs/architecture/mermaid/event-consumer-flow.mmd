@@ -1,0 +1,39 @@
+sequenceDiagram
+    participant SQS as tenant-lifecycle-tenderacl-q
+    participant C as Consumer (internal/adapter/inbound/consumer)
+    participant Idem as processed_events
+    participant SVC as internal/core/service
+    participant DB as PostgreSQL
+    participant DLQ as tenant-lifecycle-tenderacl-q-dlq
+
+    Note over SQS,DLQ: This service is receive-only on the event bus (TAC-EVT-1, TAC-D5).<br/>It publishes zero events — no outbox, no SNS producer. It now consumes<br/>TWO event types on two independent queues (ADR-0007 Wave 3 Phase 3<br/>added a second one, see member-removal-flow.mmd) — this diagram shows<br/>TenantOffboarded only.
+
+    SQS ->>+ C: TenantOffboarded{event_id, tenant_id, occurred_at}
+    C ->> C: json.Unmarshal + validate event_type/event_id/tenant_id present
+
+    C ->>+ Idem: IsProcessed(ctx, event_id)
+    Idem -->>- C: true | false
+
+    alt already processed (duplicate redelivery)
+        C -->> SQS: nil (ack — message deleted, no cascade re-run)
+    else not yet processed
+        C ->>+ SVC: CascadeDeleteForTenant(ctx, tenant_id)
+        SVC ->>+ DB: DELETE FROM tender_acl_entries WHERE tenant_id=$1
+        Note over DB: Single-table delete, no multi-repo fan-out (unlike GM-D2's<br/>three mapping tables) — tender_acl_entries is the only<br/>table this service owns. Idempotent by construction: deleting<br/>rows that no longer exist is a no-op, safe to retry in full.
+        DB -->>- SVC: rows deleted
+        SVC ->> SVC: metrics.RecordCascade(ctx, "success"|"error")
+        SVC -->>- C: nil | error
+
+        alt cascade succeeded
+            C ->>+ Idem: MarkProcessed(ctx, event_id, "TenantOffboarded", 8d retention)
+            Note over Idem: ON CONFLICT DO NOTHING — safe if a concurrent<br/>redelivery already recorded the same event_id
+            Idem -->>- C: ok
+            C -->> SQS: nil (ack — message deleted)
+        else cascade failed
+            C -->> SQS: error (message stays on queue for redelivery)
+            Note over SQS,DLQ: after maxReceiveCount=5 failed attempts,<br/>SQS moves the message to the DLQ (8-day retention)
+        end
+    end
+    deactivate C
+
+    Note over SQS,DLQ: TAC-EVT-4: a delayed or failed cascade is never a live<br/>authorization risk. A departed tenant's users have no active<br/>membership, so I-8 (AuthZ Enrichment) never issues them headers —<br/>they can never reach TAC-4 regardless of whether stale rows<br/>have been cleaned up yet.

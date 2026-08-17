@@ -1,0 +1,130 @@
+# docker-compose.yml
+#
+# NOTE: This file is for LOCAL DEVELOPMENT ONLY. It is not used in any
+# staging/production deployment path (see deploy/helm/tender-acl for
+# that). Credentials and connection strings below are dev-only defaults
+# and must never be reused outside a developer's machine.
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      # Dev-only credentials. Production uses externally managed secrets.
+      POSTGRES_DB: tender_acl
+      POSTGRES_USER: tender_acl
+      POSTGRES_PASSWORD: tender_acl
+    ports:
+      - "5536:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U tender_acl -d tender_acl"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 5s
+
+  valkey:
+    image: valkey/valkey:8-alpine
+    ports:
+      - "6382:6379"
+    healthcheck:
+      test: ["CMD", "valkey-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 5s
+
+  localstack:
+    # Community edition — SQS only. This service publishes zero events (no
+    # outbox, no SNS producer — TAC-EVT-1/TAC-D5), so there is no SNS topic
+    # to provision here, and Glue Schema Registry (Pro-only) is unused
+    # (LLD §10.4).
+    image: localstack/localstack:4.4.0
+    ports:
+      # Host 4569 → container 4566. 4566/4567/4568 are claimed by sibling
+      # services (iam-user-profile2 / iam-org-membership / iam-group-mapping)
+      # so all four can run side-by-side on the host.
+      - "4569:4566"
+    environment:
+      SERVICES: sqs
+      DEBUG: 0
+      AWS_DEFAULT_REGION: us-east-1
+    volumes:
+      - localstack-data:/var/lib/localstack
+      - ./scripts/init-localstack.sh:/etc/localstack/init/ready.d/init-localstack.sh
+    healthcheck:
+      test: ["CMD", "awslocal", "sqs", "list-queues"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 5s
+
+  tender-acl:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    depends_on:
+      postgres:
+        condition: service_healthy
+      valkey:
+        condition: service_healthy
+      localstack:
+        condition: service_healthy
+    ports:
+      - "8080:8080"
+      - "9090:9090"
+    environment:
+      HTTP_PORT: "8080"
+      METRICS_PORT: "9090"
+      # The runtime app role — tender_acl_app has no BYPASSRLS, so Row-
+      # Level Security is actually enforced even in this dev stack. The
+      # binary self-migrates at startup (see cmd/tender-acl/migrate.go)
+      # using MIGRATION_DATABASE_URL below, then opens its runtime pool
+      # against DATABASE_URL — there is no separate migrate service/Job
+      # here, matching how it runs in production (LLD §16: "migrations
+      # run at pod startup").
+      DATABASE_URL: postgres://tender_acl_app:tender_acl_app_dev_password@postgres:5432/tender_acl?sslmode=disable
+      # BYPASSRLS role used ONLY for the startup migration run (LLD §7.4).
+      # Falls back to DATABASE_URL if unset — must be set explicitly here,
+      # since tender_acl_app cannot apply schema migrations.
+      MIGRATION_DATABASE_URL: postgres://tender_acl:tender_acl@postgres:5432/tender_acl?sslmode=disable
+      VALKEY_ADDR: valkey:6379
+      VALKEY_PASSWORD: ""
+      # The one synchronous outbound dependency (LLD §6.3, §7.6.2) — points
+      # at iam-org-membership's new internal provider endpoint
+      # (GET /internal/tenants/:id/members/:user_id/exists, see
+      # O_AND_M_DELTA.md). Not part of this compose stack; run
+      # iam-org-membership separately and point this at it, or a stub.
+      CORE_INTERNAL_BASE_URL: http://host.docker.internal:8080
+      MEMBERSHIP_CHECK_TIMEOUT_MS: "300"
+      # LocalStack — container-internal port is always 4566 regardless of
+      # the host-side mapping above. AWS_ENDPOINT_URL is honored automatically
+      # by aws-sdk-go-v2's default config loader (config package >= v1.32.23);
+      # no code change is needed to redirect SQS calls here instead of real AWS.
+      SQS_QUEUE_URL: http://localstack:4566/000000000000/tenant-lifecycle-tenderacl-q
+      SQS_DLQ_URL: http://localstack:4566/000000000000/tenant-lifecycle-tenderacl-q-dlq
+      # ADR-0007 Wave 3 Phase 3 (O_AND_M_DELTA.md §5 Option B) — the
+      # per-user-removal ACL cascade, a second/independent subscription
+      # from the tenant-offboarding one above.
+      MEMBER_REMOVAL_SQS_QUEUE_URL: http://localstack:4566/000000000000/member-removal-tenderacl-q
+      MEMBER_REMOVAL_SQS_DLQ_URL: http://localstack:4566/000000000000/member-removal-tenderacl-q-dlq
+      AWS_REGION: us-east-1
+      AWS_ENDPOINT_URL: http://localstack:4566
+      # Dummy static credentials — required so the SDK's credential chain
+      # resolves from these env vars instead of falling through to the
+      # EC2 IMDS provider, which would otherwise retry against
+      # 169.254.169.254 (unreachable outside EC2) and fail with
+      # "no EC2 IMDS role found ... host is down".
+      AWS_ACCESS_KEY_ID: localstack
+      AWS_SECRET_ACCESS_KEY: localstack
+      # otlptracehttp (HTTP, not gRPC) — the collector's default port is
+      # 4318, not the gRPC default of 4317.
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4318
+      LOG_LEVEL: debug
+      ENVIRONMENT: development
+    restart: unless-stopped
+
+volumes:
+  postgres-data:
+  localstack-data:

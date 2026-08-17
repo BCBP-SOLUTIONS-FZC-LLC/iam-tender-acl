@@ -1,0 +1,46 @@
+{{- if and .Values.ingress.enabled (eq (.Values.ingress.type | default "Ingress") "Ingress") }}
+# SECURITY: /metrics is served on a separate port (9090) which classic
+# Ingress resources here never reference (only the "http" port/8080 is
+# routed) — but it is still reachable to any pod on the Service's ClusterIP.
+# Keep networkPolicy.enabled=true so :9090/metrics stays restricted to the
+# Prometheus namespace regardless of Ingress configuration.
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: {{ include "tender-acl.fullname" . }}
+  labels:
+    {{- include "tender-acl.labels" . | nindent 4 }}
+  {{- with .Values.ingress.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  {{- with .Values.ingress.className }}
+  ingressClassName: {{ . }}
+  {{- end }}
+  {{- if .Values.ingress.tls }}
+  tls:
+    {{- range .Values.ingress.tls }}
+    - hosts:
+        {{- range .hosts }}
+        - {{ . | quote }}
+        {{- end }}
+      secretName: {{ .secretName }}
+    {{- end }}
+  {{- end }}
+  rules:
+    {{- range .Values.ingress.hosts }}
+    - host: {{ .host | quote }}
+      http:
+        paths:
+          {{- range .paths }}
+          - path: {{ .path }}
+            pathType: {{ .pathType | default "Prefix" }}
+            backend:
+              service:
+                name: {{ include "tender-acl.fullname" $ }}
+                port:
+                  name: http
+          {{- end }}
+    {{- end }}
+{{- end }}

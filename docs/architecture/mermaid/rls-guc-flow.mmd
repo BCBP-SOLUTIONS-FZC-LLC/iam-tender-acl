@@ -1,0 +1,28 @@
+sequenceDiagram
+    participant Caller as internal/core/service
+    participant TX as pgcommon.WithTenantTx
+    participant Pool as pgx Pool (platform-pgcommon)
+    participant DB as PostgreSQL (RLS)
+
+    Note over Caller,TX: Every tenant-scoped call on tender_acl_entries goes through<br/>WithTenantTx — there is no code path that hands out a bare<br/>connection/tx, including TAC-4's SELECT-only path.
+
+    Caller ->>+ TX: WithTenantTx(ctx, pool, tenantID, fn)
+    TX ->>+ Pool: Begin(ctx)
+    Pool ->>+ DB: BEGIN
+    DB -->>- Pool: tx started
+
+    TX ->>+ DB: SELECT set_config('app.tenant_id', $1, true)
+    Note over DB: third argument true = "is_local" — the GUC is bound for the<br/>lifetime of THIS transaction only. It is unset automatically at<br/>COMMIT/ROLLBACK, so a pooled connection (PgBouncer transaction<br/>mode) can never leak one tenant's GUC into the next tenant's<br/>transaction on the same physical connection.
+    DB -->>- TX: ok
+
+    TX ->>+ DB: fn(ctx, tx) — the actual SELECT/INSERT/UPDATE
+    Note over DB: RLS POLICY USING/WITH CHECK<br/>(tenant_id = current_setting('app.tenant_id', true)::uuid)<br/>enforces tenant isolation at the DB layer — no cross-tenant<br/>leakage is possible even if application code omits a<br/>WHERE tenant_id = ? clause. TAC-4 runs this under the TARGET<br/>tenant's GUC, not the caller's — internal routes are not RLS-exempt.
+
+    Note over DB: Fail-closed on a missing/never-bound GUC: missing_ok=true on<br/>current_setting means a NULL/never-set GUC yields zero rows and<br/>every write is rejected — never an error, never a leak. See<br/>iam-group-mapping's rls-guc-flow.mmd for the NULLIF(...,'') hardening<br/>this service's migration should also carry if PgBouncer transaction-<br/>pooling reuse is confirmed to revert the GUC to '' rather than NULL<br/>after COMMIT in this deployment — verify against<br/>test/rls/TestRLS_NoGUCLeakageAcrossPooledConnection before relying<br/>on the simpler bare-cast form in production.
+
+    DB -->>- TX: rows / rows affected
+    TX ->>+ DB: COMMIT (or ROLLBACK if fn returned an error)
+    DB -->>- TX: done
+    TX -->>- Caller: result, error
+
+    Note over Caller,DB: TAC-D8: unlike the source iam-org-membership table, this policy<br/>does NOT wrap tenant_id checks in a rls_check_tenant() SECURITY<br/>DEFINER helper with sampled rls_violation_log forensic logging —<br/>that machinery was deliberately not carried over (mirrors GM-D8).<br/>RLS enforcement itself is unchanged — only the audit-trail-on-<br/>violation behavior was dropped.

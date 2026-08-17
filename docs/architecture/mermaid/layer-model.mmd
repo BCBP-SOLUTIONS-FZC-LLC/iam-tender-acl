@@ -1,0 +1,82 @@
+graph TD
+    subgraph cmd["Composition Root  —  cmd/tender-acl/"]
+        main["main.go\nwire pgcommon.Pool + Valkey client + membershipcheck.HTTPChecker\nrouter registration · self-migrate at startup (migrate.go) · SQS consumer goroutine\ngraceful shutdown order: HTTP+metrics servers -> cancel errgroup ctx -> SQS Run returns"]
+        config["config.go\nenv-driven config, fails fast on missing\nDATABASE_URL / SQS_QUEUE_URL\n(CORE_INTERNAL_BASE_URL, MIGRATION_DATABASE_URL default if unset)"]
+    end
+
+    subgraph domainpkg["internal/core/domain/  —  pure business types"]
+        domain["acl.go — TenderACLEntry · TenderACLLevel (view/edit/approve) · IsActive()\nCachedAccess (TAC-4 result / cache wire shape)\nerrors.go — Error, error codes"]
+    end
+
+    subgraph portpkg["internal/core/port/  —  interfaces, no implementations"]
+        repoiface["acl_repository.go\nTenderACLRepository interface"]
+        mciface["membershipcheck.go\nMembershipCheckClient interface"]
+        cacheiface["cache.go\nCache interface"]
+    end
+
+    subgraph servicepkg["internal/core/service/  —  business logic, depends only on domain+port"]
+        aclsvc["acl_service.go\nACLService: List / Grant / Revoke / CheckAccess\nGrant calls port.MembershipCheckClient.Exists — fail closed (TAC-FAIL-1)"]
+    end
+
+    subgraph httpadapter["internal/adapter/inbound/http/  —  HTTP adapter"]
+        handler["handler.go · internal_handler.go\nTAC-1 List · TAC-2 Grant · TAC-3 Revoke (public, role-gated)\nTAC-4 CheckAccess (internal, mesh-only, never 404)"]
+        router["router.go · middleware.go · context.go · health.go · dto.go"]
+    end
+
+    subgraph consumeradapter["internal/adapter/inbound/consumer/  —  SQS adapter"]
+        consumerimpl["OffboardingConsumer + MemberRemovalConsumer + ProcessedEvents\ntenant-lifecycle-tenderacl-q (tenant cascade) +\nmember-removal-tenderacl-q (per-user cascade, Wave 3 Phase 3)\ncheck-then-mark idempotency, independent consumer names\nCascadeDeleter/UserRemovalCascader/CascadeMetrics/MemberRemovalMetrics\ninterfaces declared LOCALLY (narrow slices of port.TenderACLRepository\nand the observability component), Interface-Segregation style"]
+    end
+
+    subgraph pgadapter["internal/adapter/outbound/postgres/  —  persistence adapter"]
+        repo["repository.go — TenderACLRepository (pgx impl), incl. CascadeDeleteForTenant\nmigrations/ — schema, RLS, touch_row(), roles"]
+    end
+
+    subgraph valkeyadapter["internal/adapter/outbound/valkey/  —  cache adapter"]
+        cacheimpl["Cache\ntac:acl:{tenant}:{tender}:{user} · fixed 30s TTL\nonly cache in this service (LLD §9) — TAC-1 is not cached"]
+    end
+
+    subgraph mcadapter["internal/adapter/outbound/membershipcheck/  —  outbound HTTP client"]
+        mc_http["HTTPChecker — calls iam-org-membership's\nGET /internal/tenants/:id/members/:user_id/exists\n300ms client timeout · fails closed on any error"]
+    end
+
+    subgraph obs["internal/adapter/outbound/metrics/  —  cross-cutting OTel instruments"]
+        metricsimpl["Metrics — request/write/cascade counters\nused by BOTH httpadapter (router) and consumeradapter"]
+    end
+
+    subgraph tests["Tests  —  test/"]
+        rls["rls/\nRLS policy enforcement (testcontainers)"]
+        integration["integration/\ncross-layer tests incl. SQS-compatible container (testcontainers)"]
+        e2e["e2e/\nfull HTTP-stack request flows (testcontainers)"]
+    end
+
+    main --> httpadapter
+    main --> consumeradapter
+    main --> pgadapter
+    main --> valkeyadapter
+    main --> mcadapter
+    main --> servicepkg
+    main --> obs
+    main --> config
+
+    handler --> aclsvc
+    aclsvc  --> domainpkg
+    aclsvc  --> portpkg
+
+    httpadapter --> servicepkg
+    httpadapter --> portpkg
+    httpadapter --> domainpkg
+    httpadapter --> obs
+
+    consumeradapter -.->|"narrow local interfaces,\nstructurally satisfied"| pgadapter
+    consumeradapter -.->|"narrow local interface,\nstructurally satisfied"| obs
+
+    pgadapter   -->|"implements"| portpkg
+    pgadapter   --> domainpkg
+    valkeyadapter -->|"implements"| portpkg
+    valkeyadapter --> domainpkg
+    mcadapter   -->|"implements"| portpkg
+
+    rls         -.->|"imports"| pgadapter
+    integration -.->|"imports"| pgadapter
+    integration -.->|"imports"| consumeradapter
+    e2e         -.->|"imports"| httpadapter

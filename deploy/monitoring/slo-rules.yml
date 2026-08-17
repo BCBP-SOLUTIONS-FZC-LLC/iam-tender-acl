@@ -1,0 +1,181 @@
+# SLO recording + burn-rate alerts for iam-tender-acl.
+#
+# Three SLOs are declared, drawn from LLD §14.1 (proposed, TAC-Q2 —
+# not yet SRE-confirmed; treat these thresholds as a starting point, not
+# a committed contract):
+#
+#  SLO-1  TAC-4 authorization-check latency
+#         Target: 99% of GET /internal/.../acl/:user_id requests complete
+#         within 20ms (the LLD's cache-miss target — the safe combined
+#         bound across both cache hit (5ms) and cache miss (20ms) cases).
+#         TAC-4 sits on a live authorization decision path (Tender
+#         Service, AuthZ Enrichment).
+#
+#  SLO-2  Write-path error rate
+#         Target: 99.9% of TAC-2/TAC-3 writes (tender_acl_writes_total)
+#         succeed (result != "error"), excluding intentional 4xx/503
+#         validation and grant-check failures — writes_total is only
+#         incremented after those checks pass, so every recorded "error"
+#         here is a genuine repository/database failure.
+#
+#  SLO-3  Tenant offboarding cascade convergence
+#         Target: every TenantOffboarded delivery's cascade succeeds
+#         (result="success"); the idempotent retry design means a
+#         transient failure should self-heal within a few redeliveries,
+#         not accumulate. A delayed cascade is never a live authz risk
+#         (TAC-EVT-4) — this SLO is about operational hygiene, not security.
+#
+#  SLO-4  Per-user-removal ACL cascade convergence (ADR-0007 Wave 3 Phase
+#         3, O_AND_M_DELTA.md §5 Option B)
+#         Target: every TenantMembershipRemoved delivery's cascade
+#         succeeds (result="success") — same convergence/idempotency
+#         reasoning as SLO-3, tracked as an independent series since it's
+#         a different failure domain (separate queue/DLQ from tenant
+#         offboarding).
+#
+# Recording rules pre-compute the SLI numerator/denominator so alert rules
+# can key off a scalar. Alerts follow the multi-window multi-burn-rate
+# pattern (SRE book Ch. 5): a slow burn signals an ongoing degradation, a
+# fast burn signals an outage worth paging on.
+
+groups:
+  # ── SLI recording ──────────────────────────────────────────────────────
+  - name: tender-acl.slo.records
+    interval: 30s
+    rules:
+      # TAC-4 latency histogram → error budget window.
+      - record: tender_acl:tac4_latency_sli:ratio_rate_5m
+        expr: |
+          sum(rate(tender_acl_request_duration_seconds_bucket{
+            job="tender-acl",
+            path=~".*/internal/.*acl.*",
+            le="0.020"
+          }[5m]))
+          /
+          clamp_min(sum(rate(tender_acl_request_duration_seconds_count{
+            job="tender-acl",
+            path=~".*/internal/.*acl.*"
+          }[5m])), 0.001)
+
+      - record: tender_acl:tac4_latency_sli:ratio_rate_1h
+        expr: |
+          sum(rate(tender_acl_request_duration_seconds_bucket{
+            job="tender-acl",
+            path=~".*/internal/.*acl.*",
+            le="0.020"
+          }[1h]))
+          /
+          clamp_min(sum(rate(tender_acl_request_duration_seconds_count{
+            job="tender-acl",
+            path=~".*/internal/.*acl.*"
+          }[1h])), 0.001)
+
+      # Write-path error rate across TAC-2 (grant) / TAC-3 (revoke).
+      - record: tender_acl:write_error_rate:ratio_rate_5m
+        expr: |
+          sum(rate(tender_acl_writes_total{job="tender-acl", result="error"}[5m]))
+          /
+          clamp_min(sum(rate(tender_acl_writes_total{job="tender-acl"}[5m])), 0.001)
+
+      # Tenant offboarding cascade error rate.
+      - record: tender_acl:offboarding_error_rate:ratio_rate_5m
+        expr: |
+          sum(rate(tender_acl_tenant_offboarding_cascade_total{job="tender-acl", result="error"}[5m]))
+          /
+          clamp_min(sum(rate(tender_acl_tenant_offboarding_cascade_total{job="tender-acl"}[5m])), 0.001)
+
+      # Per-user-removal ACL cascade error rate (SLO-4).
+      - record: tender_acl:member_removal_error_rate:ratio_rate_5m
+        expr: |
+          sum(rate(tender_acl_member_removal_cascade_total{job="tender-acl", result="error"}[5m]))
+          /
+          clamp_min(sum(rate(tender_acl_member_removal_cascade_total{job="tender-acl"}[5m])), 0.001)
+
+  # ── SLO burn-rate alerts (multi-window) ─────────────────────────────────
+  - name: tender-acl.slo.burn
+    interval: 1m
+    rules:
+      # SLO-1: fast burn on TAC-4 latency (2% of a 1% budget in 1h → page).
+      - alert: TenderAclSLO1_TAC4LatencyFastBurn
+        expr: |
+          (1 - tender_acl:tac4_latency_sli:ratio_rate_5m) > (14.4 * (1 - 0.99))
+          and
+          (1 - tender_acl:tac4_latency_sli:ratio_rate_1h) > (14.4 * (1 - 0.99))
+        for: 2m
+        labels:
+          severity: page
+          slo: SLO-1
+          service: iam-tender-acl
+        annotations:
+          summary: "SLO-1 fast-burn: TAC-4 authorization-check latency degraded"
+          description: |
+            TAC-4 is missing its 20ms target for {{ $value | humanizePercentage }}
+            of requests over the last 5m + 1h windows. TAC-4 is on a live
+            authorization decision path — check tender_acl_check_calls_total
+            (cache-vs-miss split isn't independently metered; a Valkey
+            outage still surfaces here as elevated latency, see readyz)
+            and Postgres query latency on tender_acl_entries.
+
+      # SLO-1: slow burn (5% of a 1% budget in 24h → ticket).
+      - alert: TenderAclSLO1_TAC4LatencySlowBurn
+        expr: |
+          (1 - tender_acl:tac4_latency_sli:ratio_rate_1h) > (6 * (1 - 0.99))
+        for: 15m
+        labels:
+          severity: ticket
+          slo: SLO-1
+          service: iam-tender-acl
+        annotations:
+          summary: "SLO-1 slow-burn: TAC-4 latency below target for 15m+"
+
+      # SLO-2: write-path error spike.
+      - alert: TenderAclSLO2_WriteErrorRateFastBurn
+        expr: tender_acl:write_error_rate:ratio_rate_5m > (14.4 * 0.001)
+        for: 2m
+        labels:
+          severity: page
+          slo: SLO-2
+          service: iam-tender-acl
+        annotations:
+          summary: "SLO-2 fast-burn: write-path error rate above target"
+          description: |
+            {{ $value | humanizePercentage }} of TAC-2/TAC-3 writes are
+            failing. Likely a Postgres failure — cross-reference /readyz
+            and recent deploys.
+
+      # SLO-3: offboarding cascade errors accumulating.
+      - alert: TenderAclSLO3_OffboardingErrorRateElevated
+        expr: tender_acl:offboarding_error_rate:ratio_rate_5m > 0
+        for: 20m
+        labels:
+          severity: ticket
+          slo: SLO-3
+          service: iam-tender-acl
+        annotations:
+          summary: "SLO-3: tenant offboarding cascade errors not self-healing"
+          description: |
+            tender_acl:offboarding_error_rate:ratio_rate_5m has been
+            non-zero for 20m+. The cascade is idempotent and should
+            converge on redelivery — a sustained non-zero rate means a
+            persistent dependency failure, not transient contention. Check
+            consumer logs and tenant-lifecycle-tenderacl-q-dlq depth. Not
+            a live authz risk (TAC-EVT-4), but should not be left unfixed.
+
+      # SLO-4: member-removal cascade errors accumulating (ADR-0007 Wave 3
+      # Phase 3).
+      - alert: TenderAclSLO4_MemberRemovalErrorRateElevated
+        expr: tender_acl:member_removal_error_rate:ratio_rate_5m > 0
+        for: 20m
+        labels:
+          severity: ticket
+          slo: SLO-4
+          service: iam-tender-acl
+        annotations:
+          summary: "SLO-4: member removal ACL cascade errors not self-healing"
+          description: |
+            tender_acl:member_removal_error_rate:ratio_rate_5m has been
+            non-zero for 20m+. Same idempotent-retry convergence
+            expectation as SLO-3 — a sustained non-zero rate means a
+            persistent dependency failure, not transient contention. Check
+            consumer logs and member-removal-tenderacl-q-dlq depth. Not a
+            live authz risk, but should not be left unfixed.

@@ -1,0 +1,66 @@
+sequenceDiagram
+    participant Client
+    participant GW as API Gateway
+    participant MW as gincommon middlewares
+    participant H as Gin Handler (internal/adapter/inbound/http)
+    participant MC as port.MembershipCheckClient
+    participant Core as iam-org-membership
+    participant DB as PostgreSQL (RLS)
+    participant Cache as Valkey (tac:acl)
+
+    Client ->>+ GW: HTTP request (JWT already validated upstream)
+    GW ->>+ MW: inject X-Tenant-Id / X-User-Id / X-Tenant-Roles headers
+    Note over MW: otelgin.Middleware — OTel span<br/>RequestContextMiddleware — parse headers into RequestContext<br/>Recovery — panic -> 500 JSON, never crashes the process<br/>Logger — structured request log<br/>metricsMiddleware — tender_acl_requests_total / _duration_seconds
+
+    alt public admin endpoint (TAC-1 List / TAC-2 Grant / TAC-3 Revoke)
+        MW ->>+ H: c.Next()
+        Note over H: 403 insufficient_role unless caller holds<br/>tender_admin / tenant_admin / tenant_owner for the path tenant
+    else internal authorization check (TAC-4)
+        MW ->>+ H: c.Next()
+        Note over H: no role check — mTLS-only network path,<br/>tenant isolation still enforced by RLS alone,<br/>runs under the TARGET tenant's GUC
+    end
+
+    alt TAC-2 Grant
+        H ->>+ MC: Exists(ctx, tenantID, userID)
+        MC ->>+ Core: GET /internal/tenants/:id/members/:user_id/exists
+        Core -->>- MC: {"active": true|false}
+        alt Core unreachable / timeout (300ms budget)
+            MC -->>- H: error
+            H -->> Client: 503 core_unavailable (fail closed — no row written, TAC-FAIL-1)
+        else active: false
+            MC -->>- H: false, nil
+            H -->> Client: 422 grantee_not_active_member
+        else active: true
+            MC -->>- H: true, nil
+            H ->>+ DB: INSERT tender_acl_entries (WithTenantTx)
+            DB -->>- H: row, or 409 duplicate_grant on uq_tae_active_entry
+            H ->> Cache: DEL tac:acl:{tenant}:{tender}:{user} (best-effort, post-commit)
+            H -->> Client: 201
+        end
+    else TAC-3 Revoke
+        H ->>+ DB: UPDATE ... SET deleted_at=now() WHERE ... AND deleted_at IS NULL (WithTenantTx)
+        Note over DB: No record_version / optimistic-lock check — matches source<br/>iam-org-membership behavior unchanged — see IMPLEMENTATION_GAP_ANALYSIS.md
+        DB -->>- H: rows affected
+        H ->> Cache: DEL tac:acl:{tenant}:{tender}:{user} (best-effort, post-commit)
+        H -->> Client: 200
+    else TAC-1 List
+        H ->>+ DB: SELECT ... WHERE tenant_id=$1 AND tender_id=$2 (WithTenantTx, not cached)
+        DB -->>- H: rows
+        H -->> Client: 200
+    else TAC-4 CheckAccess
+        H ->>+ Cache: GET tac:acl:{tenant}:{tender}:{user}
+        alt cache hit
+            Cache -->>- H: cached {has_access, access_level, expires_at}
+        else cache miss
+            Cache -->>- H: miss
+            H ->>+ DB: SELECT ... WHERE deleted_at IS NULL AND (expires_at IS NULL OR expires_at > now())
+            DB -->>- H: row or none
+            H ->> Cache: SET tac:acl:{tenant}:{tender}:{user}, TTL 30s
+        end
+        H -->> Client: 200 {has_access, access_level, expires_at} — never 404
+    end
+
+    H -->>- MW: response (200/201/403/422/503)
+    MW -->>- GW: return
+    Note over MW: tender_acl_requests_total / _duration_seconds recorded<br/>OTel span ended · structured log line written
+    GW -->>- Client: HTTP response

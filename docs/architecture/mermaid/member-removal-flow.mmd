@@ -1,0 +1,36 @@
+sequenceDiagram
+    participant SQS as member-removal-tenderacl-q
+    participant C as MemberRemovalConsumer (internal/adapter/inbound/consumer)
+    participant Idem as processed_events (consumer=member_removal)
+    participant SVC as internal/adapter/outbound/postgres repository
+    participant DB as PostgreSQL
+    participant DLQ as member-removal-tenderacl-q-dlq
+
+    SQS ->>+ C: TenantMembershipRemoved{id, tenant_id, subject, time}
+    C ->> C: validate event type == TenantMembershipRemoved, parse id/tenant_id/subject
+
+    C ->>+ Idem: IsProcessed(ctx, id)
+    Idem -->>- C: true | false
+
+    alt already processed (duplicate redelivery)
+        C -->> SQS: nil (ack — message deleted, no cascade re-run)
+    else not yet processed
+        C ->>+ SVC: SoftDeleteForUser(ctx, tenant_id, subject)
+        SVC ->>+ DB: UPDATE tender_acl_entries SET deleted_at=now()<br/>WHERE tenant_id=$1 AND user_id=$2 AND deleted_at IS NULL
+        Note over DB: SOFT delete, unlike CascadeDeleteForTenant's hard delete —<br/>this table's retention framing (LLD §18) keeps revoked rows for<br/>audit outside of tenant offboarding, the only hard-delete point.<br/>Idempotent by construction: re-running against already-deleted<br/>rows matches zero rows, no error.
+        DB -->>- SVC: rows soft-deleted
+        SVC -->>- C: deleted count | error
+        C ->> C: metrics.RecordMemberRemovalCascade(ctx, "success"|"error")
+
+        alt cascade succeeded
+            C ->>+ Idem: MarkProcessed(ctx, id)
+            Idem -->>- C: ok
+            C -->> SQS: nil (ack — message deleted)
+        else cascade failed
+            C -->> SQS: error (message stays on queue for redelivery)
+            Note over SQS,DLQ: after maxReceiveCount=5 failed attempts,<br/>SQS moves the message to the DLQ (8-day retention)
+        end
+    end
+    deactivate C
+
+    Note over SQS,DLQ: Same TAC-EVT-4-style argument as tenant offboarding, at the<br/>single-user grain: a removed user has no active membership, so<br/>I-8 never issues them headers regardless of whether their stale<br/>ACL rows have been cleaned up yet.
