@@ -13,9 +13,6 @@ import (
 	"os"
 	"time"
 
-	"github.com/golang-migrate/migrate/v4"
-	migratepg "github.com/golang-migrate/migrate/v4/database/postgres"
-	"github.com/golang-migrate/migrate/v4/source/iofs"
 	// Registers the "postgres" database/sql driver used throughout this
 	// file.
 	_ "github.com/lib/pq"
@@ -36,9 +33,11 @@ type PostgresFixture struct {
 }
 
 // StartPostgres launches a postgres:16-alpine container and applies every
-// embedded migration in internal/adapter/outbound/postgres.MigrationsFS. The returned
-// teardown function must be called (typically via defer in TestMain) to
-// terminate the container.
+// embedded migration in internal/adapter/outbound/postgres.MigrationsFS via
+// postgres.RunMigrations — the same production entry point
+// cmd/tender-acl/main.go calls — so the test fixture can never drift from
+// what actually ships. The returned teardown function must be called
+// (typically via defer in TestMain) to terminate the container.
 func StartPostgres(ctx context.Context) (*PostgresFixture, func(), error) {
 	req := testcontainers.ContainerRequest{
 		Image:        "postgres:16-alpine",
@@ -85,7 +84,7 @@ func StartPostgres(ctx context.Context) (*PostgresFixture, func(), error) {
 		return nil, nil, fmt.Errorf("wait for postgres readiness: %w", err)
 	}
 
-	if err := applyMigrations(adminDSN); err != nil {
+	if err := postgres.RunMigrations(ctx, adminDSN, nil); err != nil {
 		teardown()
 		return nil, nil, fmt.Errorf("apply migrations: %w", err)
 	}
@@ -114,39 +113,4 @@ func waitForPing(ctx context.Context, dsn string) error {
 		time.Sleep(500 * time.Millisecond)
 	}
 	return fmt.Errorf("postgres never became ready: %w", lastErr)
-}
-
-// applyMigrations runs the same embedded migration set the production
-// binary self-migrates with (cmd/tender-acl/migrate.go), so the test
-// fixture can never drift from what actually ships.
-func applyMigrations(dsn string) error {
-	src, err := iofs.New(postgres.MigrationsFS, "migrations")
-	if err != nil {
-		return fmt.Errorf("open embedded migrations: %w", err)
-	}
-
-	db, err := sql.Open("postgres", dsn)
-	if err != nil {
-		return fmt.Errorf("open db for migrations: %w", err)
-	}
-	defer func() {
-		if closeErr := db.Close(); closeErr != nil {
-			fmt.Fprintln(os.Stderr, "testutil: close migration connection:", closeErr)
-		}
-	}()
-
-	driver, err := migratepg.WithInstance(db, &migratepg.Config{})
-	if err != nil {
-		return fmt.Errorf("build migrate driver: %w", err)
-	}
-
-	m, err := migrate.NewWithInstance("iofs", src, "postgres", driver)
-	if err != nil {
-		return fmt.Errorf("build migrator: %w", err)
-	}
-
-	if err := m.Up(); err != nil && err != migrate.ErrNoChange {
-		return fmt.Errorf("run migrations: %w", err)
-	}
-	return nil
 }

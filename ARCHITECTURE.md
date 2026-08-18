@@ -199,9 +199,9 @@ sequenceDiagram
             H -->> Client: 201
         end
     else TAC-3 Revoke
-        H ->>+ DB: UPDATE ... SET deleted_at=now() WHERE ... AND deleted_at IS NULL (WithTenantTx)
-        Note over DB: No record_version / optimistic-lock check — matches source<br/>iam-org-membership behavior unchanged — see IMPLEMENTATION_GAP_ANALYSIS.md
-        DB -->>- H: rows affected
+        H ->>+ DB: UPDATE ... SET deleted_at=now() WHERE ... AND deleted_at IS NULL<br/>AND record_version=$4 (WithTenantTx)
+        Note over DB: Caller must send its last-read record_version in the request<br/>body (LLD §11.2/§12.1). Zero rows affected (stale version, already<br/>revoked, or no such row) -> 409 optimistic_lock_conflict — see<br/>IMPLEMENTATION_GAP_ANALYSIS.md's Discrepancy 1 for this check's history.
+        DB -->>- H: rows affected, or 409 optimistic_lock_conflict
         H ->> Cache: DEL tac:acl:{tenant}:{tender}:{user} (best-effort, post-commit)
         H -->> Client: 204
     else TAC-1 List
@@ -227,8 +227,6 @@ sequenceDiagram
     GW -->>- Client: HTTP response
 ```
 > Source: [`docs/architecture/mermaid/request-flow.mmd`](docs/architecture/mermaid/request-flow.mmd)
-> (Note: TAC-3's response is `204 No Content`, corrected here from the source `.mmd` file's `200`
-> label — see `IMPLEMENTATION_GAP_ANALYSIS.md`'s "minor mermaid-diagram inconsistency" entry.)
 
 ## Event consumer flow
 

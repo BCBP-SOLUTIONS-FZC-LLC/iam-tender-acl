@@ -21,7 +21,7 @@ import (
 type fakeRepo struct {
 	listFn                   func(ctx context.Context, tenantID, tenderID uuid.UUID) ([]domain.TenderACLEntry, error)
 	grantFn                  func(ctx context.Context, entry domain.TenderACLEntry) (domain.TenderACLEntry, error)
-	revokeFn                 func(ctx context.Context, tenantID, tenderID, userID uuid.UUID) (bool, error)
+	revokeFn                 func(ctx context.Context, tenantID, tenderID, userID uuid.UUID, expectedVersion int64) error
 	findActiveFn             func(ctx context.Context, tenantID, tenderID, userID uuid.UUID) (*domain.TenderACLEntry, error)
 	cascadeDeleteForTenantFn func(ctx context.Context, tenantID uuid.UUID) (int64, error)
 	softDeleteForUserFn      func(ctx context.Context, tenantID, userID uuid.UUID) (int64, error)
@@ -33,8 +33,8 @@ func (f *fakeRepo) List(ctx context.Context, tenantID, tenderID uuid.UUID) ([]do
 func (f *fakeRepo) Grant(ctx context.Context, entry domain.TenderACLEntry) (domain.TenderACLEntry, error) {
 	return f.grantFn(ctx, entry)
 }
-func (f *fakeRepo) Revoke(ctx context.Context, tenantID, tenderID, userID uuid.UUID) (bool, error) {
-	return f.revokeFn(ctx, tenantID, tenderID, userID)
+func (f *fakeRepo) Revoke(ctx context.Context, tenantID, tenderID, userID uuid.UUID, expectedVersion int64) error {
+	return f.revokeFn(ctx, tenantID, tenderID, userID, expectedVersion)
 }
 func (f *fakeRepo) FindActive(ctx context.Context, tenantID, tenderID, userID uuid.UUID) (*domain.TenderACLEntry, error) {
 	return f.findActiveFn(ctx, tenantID, tenderID, userID)
@@ -97,6 +97,8 @@ type fakeMetrics struct{}
 func (fakeMetrics) RecordGrantCheck(context.Context, string)    {}
 func (fakeMetrics) RecordCheckCall(context.Context, string)     {}
 func (fakeMetrics) RecordWrite(context.Context, string, string) {}
+func (fakeMetrics) RecordCacheHit(context.Context)              {}
+func (fakeMetrics) RecordCacheMiss(context.Context)             {}
 
 var _ ACLMetrics = fakeMetrics{}
 
@@ -357,56 +359,62 @@ func TestService_Grant_CacheInvalidationFailureDoesNotFailGrant(t *testing.T) {
 
 func TestService_Revoke_DelegatesToRepo(t *testing.T) {
 	tenantID, tenderID, userID := uuid.New(), uuid.New(), uuid.New()
+	const version int64 = 3
 	called := false
-	repo := &fakeRepo{revokeFn: func(_ context.Context, tt, td, uu uuid.UUID) (bool, error) {
+	repo := &fakeRepo{revokeFn: func(_ context.Context, tt, td, uu uuid.UUID, v int64) error {
 		called = true
 		assert.Equal(t, tenantID, tt)
 		assert.Equal(t, tenderID, td)
 		assert.Equal(t, userID, uu)
-		return true, nil
+		assert.Equal(t, version, v)
+		return nil
 	}}
 	svc := newTestService(repo, &fakeChecker{}, &fakeCache{}, t)
 
-	err := svc.Revoke(context.Background(), tenantID, tenderID, userID)
+	err := svc.Revoke(context.Background(), tenantID, tenderID, userID, version)
 	require.NoError(t, err)
 	assert.True(t, called)
 }
 
 func TestService_Revoke_PropagatesRepoError(t *testing.T) {
 	repoErr := errors.New("db down")
-	repo := &fakeRepo{revokeFn: func(context.Context, uuid.UUID, uuid.UUID, uuid.UUID) (bool, error) {
-		return false, repoErr
+	repo := &fakeRepo{revokeFn: func(context.Context, uuid.UUID, uuid.UUID, uuid.UUID, int64) error {
+		return repoErr
 	}}
 	svc := newTestService(repo, &fakeChecker{}, &fakeCache{}, t)
 
-	err := svc.Revoke(context.Background(), uuid.New(), uuid.New(), uuid.New())
+	err := svc.Revoke(context.Background(), uuid.New(), uuid.New(), uuid.New(), 1)
 	assert.ErrorIs(t, err, repoErr)
 }
 
-// TestService_Revoke_NotFoundIsNotAnError covers LLD §12.2's "idempotent in
-// effect" framing: revoking an already-revoked (or never-granted) entry is
-// not an error — found=false, err=nil from the repo must not surface as a
-// failure.
-func TestService_Revoke_NotFoundIsNotAnError(t *testing.T) {
-	repo := &fakeRepo{revokeFn: func(context.Context, uuid.UUID, uuid.UUID, uuid.UUID) (bool, error) {
-		return false, nil
+// TestService_Revoke_VersionConflict_PropagatesAsError covers LLD
+// §11.2/§12.1's optimistic-lock contract: a repo reporting
+// ErrCodeOptimisticLockConflict (zero rows affected — stale version,
+// already revoked, or never existed; the repo doesn't distinguish these)
+// must surface as a real error, not be swallowed into a silent success.
+func TestService_Revoke_VersionConflict_PropagatesAsError(t *testing.T) {
+	repo := &fakeRepo{revokeFn: func(context.Context, uuid.UUID, uuid.UUID, uuid.UUID, int64) error {
+		return domain.NewError(domain.ErrCodeOptimisticLockConflict, "record version conflict")
 	}}
 	svc := newTestService(repo, &fakeChecker{}, &fakeCache{}, t)
 
-	err := svc.Revoke(context.Background(), uuid.New(), uuid.New(), uuid.New())
-	require.NoError(t, err)
+	err := svc.Revoke(context.Background(), uuid.New(), uuid.New(), uuid.New(), 1)
+	require.Error(t, err)
+	code, ok := domain.CodeOf(err)
+	require.True(t, ok)
+	assert.Equal(t, domain.ErrCodeOptimisticLockConflict, code)
 }
 
 func TestService_Revoke_CacheInvalidationFailureDoesNotFailRevoke(t *testing.T) {
-	repo := &fakeRepo{revokeFn: func(context.Context, uuid.UUID, uuid.UUID, uuid.UUID) (bool, error) {
-		return true, nil
+	repo := &fakeRepo{revokeFn: func(context.Context, uuid.UUID, uuid.UUID, uuid.UUID, int64) error {
+		return nil
 	}}
 	c := &fakeCache{deleteFn: func(context.Context, uuid.UUID, uuid.UUID, uuid.UUID) error {
 		return errors.New("valkey down")
 	}}
 	svc := newTestService(repo, &fakeChecker{}, c, t)
 
-	err := svc.Revoke(context.Background(), uuid.New(), uuid.New(), uuid.New())
+	err := svc.Revoke(context.Background(), uuid.New(), uuid.New(), uuid.New(), 1)
 	require.NoError(t, err, "a cache invalidation failure must not fail the revoke itself")
 }
 

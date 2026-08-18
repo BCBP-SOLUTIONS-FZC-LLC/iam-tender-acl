@@ -29,9 +29,7 @@ func (s stubChecker) Exists(context.Context, uuid.UUID, uuid.UUID) (bool, uuid.U
 
 func testMetrics(t *testing.T) *metrics.Metrics {
 	t.Helper()
-	m, err := metrics.NewMetrics(otel.Meter("integration-test"))
-	require.NoError(t, err)
-	return m
+	return sharedMetrics
 }
 
 // TestService_CheckAccess_CacheHit_ThenCacheMissAfterDelete exercises the
@@ -48,7 +46,7 @@ func TestService_CheckAccess_CacheHit_ThenCacheMissAfterDelete(t *testing.T) {
 
 	svc := service.NewACLService(repo, stubChecker{active: true, membershipID: membershipID}, valkeyCache, testMetrics(t), slog.Default(), otel.Tracer("test"))
 
-	_, err := svc.Grant(ctx, tenantID, tenderID, userID, uuid.New(), domain.ACLApprove, "", nil)
+	created, err := svc.Grant(ctx, tenantID, tenderID, userID, uuid.New(), domain.ACLApprove, "", nil)
 	require.NoError(t, err)
 
 	// First call: cache miss, falls through to Postgres, populates Valkey.
@@ -63,7 +61,7 @@ func TestService_CheckAccess_CacheHit_ThenCacheMissAfterDelete(t *testing.T) {
 	require.True(t, hit, "the first CheckAccess call must have populated Valkey")
 	assert.True(t, cachedBeforeRevoke.HasAccess)
 
-	require.NoError(t, svc.Revoke(ctx, tenantID, tenderID, userID))
+	require.NoError(t, svc.Revoke(ctx, tenantID, tenderID, userID, created.RecordVersion))
 
 	_, hitAfterRevoke, err := valkeyCache.Get(ctx, tenantID, tenderID, userID)
 	require.NoError(t, err)

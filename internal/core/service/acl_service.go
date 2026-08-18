@@ -29,6 +29,8 @@ type ACLMetrics interface {
 	RecordGrantCheck(ctx context.Context, status string)
 	RecordCheckCall(ctx context.Context, status string)
 	RecordWrite(ctx context.Context, op, result string)
+	RecordCacheHit(ctx context.Context)
+	RecordCacheMiss(ctx context.Context)
 }
 
 // ACLService implements TAC-1..TAC-4, near-verbatim from
@@ -126,17 +128,16 @@ func (s *ACLService) Grant(
 	return created, nil
 }
 
-// Revoke implements TAC-3. Per explicit instruction, this preserves
-// iam-org-membership's original behavior exactly: a plain soft-delete with
-// no record_version / optimistic-lock check, even though
-// tender-acl-service-lld.md §12.1 specifies one — see
-// IMPLEMENTATION_GAP_ANALYSIS.md. Idempotent in effect: revoking an
-// already-revoked (or never-granted) entry is not an error (LLD §12.2).
-func (s *ACLService) Revoke(ctx context.Context, tenantID, tenderID, userID uuid.UUID) error {
+// Revoke implements TAC-3: a soft-delete optimistic-locked on the caller's
+// last-read record_version (LLD §11.2/§12.1) — a version mismatch,
+// including one caused by the row already being revoked since it was last
+// read, surfaces as domain.ErrCodeOptimisticLockConflict (409) rather than
+// a silent no-op, matching the LLD's sequence diagram exactly.
+func (s *ACLService) Revoke(ctx context.Context, tenantID, tenderID, userID uuid.UUID, expectedVersion int64) error {
 	ctx, span := s.tracer.Start(ctx, "service.ACLService.Revoke")
 	defer span.End()
 
-	if _, err := s.repo.Revoke(ctx, tenantID, tenderID, userID); err != nil {
+	if err := s.repo.Revoke(ctx, tenantID, tenderID, userID, expectedVersion); err != nil {
 		s.metrics.RecordWrite(ctx, "revoke", "error")
 		return fmt.Errorf("acl: revoke: %w", err)
 	}
@@ -157,10 +158,15 @@ func (s *ACLService) CheckAccess(ctx context.Context, tenantID, tenderID, userID
 	defer span.End()
 
 	if cached, hit, err := s.cache.Get(ctx, tenantID, tenderID, userID); err != nil {
+		// A Valkey error is a distinct failure mode (LLD §9.4) from an
+		// ordinary miss — logged, but counted in neither cache metric.
 		s.logger.WarnContext(ctx, "acl check cache read failed, falling back to postgres", slog.String("error", err.Error()))
 	} else if hit {
+		s.metrics.RecordCacheHit(ctx)
 		s.metrics.RecordCheckCall(ctx, statusFor(cached.HasAccess))
 		return *cached, nil
+	} else {
+		s.metrics.RecordCacheMiss(ctx)
 	}
 
 	entry, err := s.repo.FindActive(ctx, tenantID, tenderID, userID)

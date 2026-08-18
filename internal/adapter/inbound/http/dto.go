@@ -31,6 +31,14 @@ type GrantRequest struct {
 	ExpiresAt   *time.Time `json:"expires_at,omitempty"`
 }
 
+// RevokeRequest is TAC-3's request body — the caller's last-read
+// record_version (LLD §8.4/§11.2/§12.1). A mismatch against the current row
+// (including a row already revoked since it was last read) returns
+// 409 optimistic_lock_conflict.
+type RevokeRequest struct {
+	RecordVersion int64 `json:"record_version" binding:"required"`
+}
+
 // ACLResponse is the wire shape of a single tender_acl_entries row, used by
 // TAC-1 and TAC-2.
 type ACLResponse struct {

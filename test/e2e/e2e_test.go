@@ -127,9 +127,11 @@ func TestE2E_GrantCheckRevokeCheck(t *testing.T) {
 		t.Fatalf("expected a positive TTL <= 30s on %s after cache population, got %s", key, ttl)
 	}
 
-	// TAC-3: revoke.
+	// TAC-3: revoke, carrying the grant's own record_version (LLD
+	// §11.2/§12.1's optimistic-lock contract).
 	revokePath := fmt.Sprintf("/api/v1/tenants/%s/tenders/%s/acl/%s", tenantID, tenderID, granteeID)
-	rec = doJSON(t, http.MethodDelete, revokePath, nil, tenantID, granterID, "tender_admin")
+	revokeBody := map[string]any{"record_version": granted.RecordVersion}
+	rec = doJSON(t, http.MethodDelete, revokePath, revokeBody, tenantID, granterID, "tender_admin")
 	if rec.Code != http.StatusNoContent {
 		t.Fatalf("revoke: expected 204, got %d: %s", rec.Code, rec.Body.String())
 	}
@@ -199,5 +201,46 @@ func TestE2E_DuplicateGrant_Returns409(t *testing.T) {
 	rec = doJSON(t, http.MethodPost, grantPath, grantBody, tenantID, granterID, "tenant_admin")
 	if rec.Code != http.StatusConflict {
 		t.Fatalf("duplicate grant: expected 409, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+// TestE2E_RevokeStaleVersion_Returns409 confirms TAC-3's optimistic-lock
+// contract (LLD §11.2/§12.1) end-to-end through the real HTTP+Postgres
+// path: a record_version that's behind the row's current value — here,
+// the version obtained at grant time, sent AFTER the row has already
+// received one successful revoke — must be rejected with
+// 409 optimistic_lock_conflict, not silently accepted.
+func TestE2E_RevokeStaleVersion_Returns409(t *testing.T) {
+	tenantID := uuid.New()
+	granterID := uuid.New()
+	granteeID := uuid.New()
+	tenderID := uuid.New()
+
+	grantBody := map[string]any{"user_id": granteeID.String(), "access_level": "view"}
+	grantPath := fmt.Sprintf("/api/v1/tenants/%s/tenders/%s/acl", tenantID, tenderID)
+	rec := doJSON(t, http.MethodPost, grantPath, grantBody, tenantID, granterID, "tender_admin")
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("grant: expected 201, got %d: %s", rec.Code, rec.Body.String())
+	}
+	var granted httpadapter.ACLResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &granted); err != nil {
+		t.Fatalf("decode grant response: %v", err)
+	}
+
+	revokePath := fmt.Sprintf("/api/v1/tenants/%s/tenders/%s/acl/%s", tenantID, tenderID, granteeID)
+	revokeBody := map[string]any{"record_version": granted.RecordVersion}
+
+	// First revoke, with the correct just-granted version, succeeds.
+	rec = doJSON(t, http.MethodDelete, revokePath, revokeBody, tenantID, granterID, "tender_admin")
+	if rec.Code != http.StatusNoContent {
+		t.Fatalf("first revoke: expected 204, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	// Retrying with the SAME (now-stale — touch_row() already bumped the
+	// row's record_version on the first revoke) version must conflict, not
+	// silently no-op a second time.
+	rec = doJSON(t, http.MethodDelete, revokePath, revokeBody, tenantID, granterID, "tender_admin")
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("stale-version revoke: expected 409, got %d: %s", rec.Code, rec.Body.String())
 	}
 }

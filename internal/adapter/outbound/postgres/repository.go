@@ -130,24 +130,29 @@ func (r *TenderACLRepository) Grant(ctx context.Context, entry domain.TenderACLE
 	return created, err
 }
 
-// Revoke implements TAC-3 exactly as iam-org-membership's original code
-// did: a plain soft-delete, no record_version check (see
-// service.ACLService.Revoke's doc comment and IMPLEMENTATION_GAP_ANALYSIS.md).
-func (r *TenderACLRepository) Revoke(ctx context.Context, tenantID, tenderID, userID uuid.UUID) (bool, error) {
-	var found bool
-	err := withTenant(ctx, r.pool, tenantID, func(ctx context.Context, tx pgx.Tx) error {
+// Revoke implements TAC-3's write: soft-delete gated on expectedVersion
+// matching the row's current record_version (LLD §11.2/§12.1). Zero rows
+// affected — stale version, already revoked, or no such row — returns
+// ErrCodeOptimisticLockConflict; the touch_row() trigger (migration 0002)
+// bumps record_version on the UPDATE itself, so a caller that successfully
+// revokes once and retries with the same version correctly conflicts
+// rather than silently no-op'ing twice.
+func (r *TenderACLRepository) Revoke(ctx context.Context, tenantID, tenderID, userID uuid.UUID, expectedVersion int64) error {
+	return withTenant(ctx, r.pool, tenantID, func(ctx context.Context, tx pgx.Tx) error {
 		tag, err := tx.Exec(ctx, `
 			UPDATE tender_acl_entries SET deleted_at = now()
-			WHERE tenant_id = $1 AND tender_id = $2 AND user_id = $3 AND deleted_at IS NULL`,
-			tenantID, tenderID, userID,
+			WHERE tenant_id = $1 AND tender_id = $2 AND user_id = $3
+			  AND deleted_at IS NULL AND record_version = $4`,
+			tenantID, tenderID, userID, expectedVersion,
 		)
 		if err != nil {
 			return fmt.Errorf("revoke tender_acl_entries: %w", err)
 		}
-		found = tag.RowsAffected() > 0
+		if tag.RowsAffected() == 0 {
+			return domain.NewError(domain.ErrCodeOptimisticLockConflict, "record version conflict")
+		}
 		return nil
 	})
-	return found, err
 }
 
 // FindActive implements the TAE-3 predicate for TAC-4/I-12.

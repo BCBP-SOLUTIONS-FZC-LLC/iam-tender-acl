@@ -21,6 +21,7 @@ import (
 
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
+	"go.opentelemetry.io/otel"
 	"golang.org/x/sync/errgroup"
 
 	_ "github.com/BCBP-SOLUTIONS-FZC-LLC/iam-tender-acl/docs/swagger"
@@ -32,6 +33,7 @@ import (
 	"github.com/BCBP-SOLUTIONS-FZC-LLC/iam-tender-acl/internal/adapter/outbound/valkey"
 	"github.com/BCBP-SOLUTIONS-FZC-LLC/iam-tender-acl/internal/core/service"
 	events "github.com/BCBP-SOLUTIONS-FZC-LLC/platform-events/pkg/events"
+	gincommon "github.com/BCBP-SOLUTIONS-FZC-LLC/platform-gincommon/pkg/gincommon"
 	pgcommon "github.com/BCBP-SOLUTIONS-FZC-LLC/platform-pgcommon/pkg/pgcommon"
 )
 
@@ -57,30 +59,51 @@ func run() error {
 	baseCtx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	tel, err := setupTelemetry(baseCtx, cfg)
-	if err != nil {
-		return fmt.Errorf("setup telemetry: %w", err)
+	// Tracing is entirely gincommon's: httpadapter.NewRouter's
+	// gincommon.ObservabilityMiddlewares call lazily installs the real OTel
+	// TracerProvider (via the Tracing options below) the first time it
+	// runs — there is no separate hand-rolled TracerProvider/exporter setup
+	// in this process. otel.Tracer returns a delegating handle that's safe
+	// to obtain before that installation happens and use afterward (the
+	// OTel SDK's documented global-provider swap behavior).
+	insecure := cfg.Environment != "production"
+	sampleRatio := 1.0
+	if cfg.Environment == "production" {
+		sampleRatio = 0.1
 	}
+	tracing := &gincommon.TracingOptions{
+		Endpoint:    cfg.OTELExporterOTLPEndpoint,
+		Insecure:    &insecure,
+		SampleRatio: &sampleRatio,
+	}
+	tracer := otel.Tracer("tender-acl")
 	defer func() {
-		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cancel()
-		tel.Shutdown(shutdownCtx)
+		if shutdownErr := gincommon.Shutdown(nil); shutdownErr != nil {
+			logger.Error("telemetry shutdown failed", slog.String("error", shutdownErr.Error()))
+		}
 	}()
 
-	if err = runMigrations(cfg.MigrationDatabaseURL); err != nil {
+	if err = aclpostgres.RunMigrations(baseCtx, cfg.MigrationDatabaseURL, slogDomainLogger{l: logger}); err != nil {
 		return fmt.Errorf("run migrations: %w", err)
 	}
 
-	// PGBouncerMode+GUCProvider: app.tenant_id is injected as a
-	// transaction-local GUC on every pgcommon.RunInTx call (see
-	// internal/adapter/outbound/postgres.withTenant), never session-scoped — required
-	// for correctness under PgBouncer transaction pooling (LLD §17.5 Case
-	// 5, the no-GUC-leakage-across-pooled-connection test).
-	pgPool, err := pgcommon.NewPool(baseCtx, pgcommon.Config{
-		DSN:           cfg.DatabaseURL,
-		PGBouncerMode: true,
-		GUCProvider:   pgcommon.GUCSetFromContext,
-	})
+	pgCfg, pgWarnings := pgcommon.ConfigFromEnv()
+	for _, w := range pgWarnings {
+		logger.Warn("postgres config warning", slog.String("key", w.Key), slog.String("reason", w.Reason))
+	}
+	// GUCProvider: app.tenant_id is injected as a transaction-local GUC on
+	// every pgcommon.RunInTx call (see
+	// internal/adapter/outbound/postgres.withTenant), never session-scoped.
+	pgCfg.GUCProvider = pgcommon.GUCSetFromContext
+	// PGBouncerMode is forced true unconditionally — not env-driven via
+	// PG_BOUNCER_MODE — because transaction-scoped GUCs are required for
+	// correctness here regardless of deployment topology (LLD §17.5 Case 5,
+	// the no-GUC-leakage-across-pooled-connection test); this is not a
+	// tunable, so it isn't left to configuration to get right.
+	pgCfg.PGBouncerMode = true
+	pgCfg.Logger = slogDomainLogger{l: logger}
+	pgCfg.Tracer = otelSpanTracer{tracer: tracer}
+	pgPool, err := pgcommon.NewPool(baseCtx, pgCfg)
 	if err != nil {
 		return fmt.Errorf("connect to postgres: %w", err)
 	}
@@ -104,7 +127,12 @@ func run() error {
 	}()
 	aclCache := valkey.NewCache(valkeyClient)
 
-	svcMetrics, err := metrics.NewMetrics(tel.Meter)
+	// gincommon.MetricsRegisterer() is safe to call before
+	// ObservabilityMiddlewares runs (falls back to prometheus.DefaultRegisterer
+	// until gincommon's own Init runs, which is exactly the registry these
+	// collectors were already implicitly using) — same precedent as
+	// iam-user-profile's cmd/server/main.go.
+	svcMetrics, err := metrics.NewMetrics(gincommon.MetricsRegisterer())
 	if err != nil {
 		return fmt.Errorf("build metrics: %w", err)
 	}
@@ -118,14 +146,14 @@ func run() error {
 	offboardingProcessedEvents := consumer.NewProcessedEvents(rawPool, "tenant_lifecycle_cleanup")
 	memberRemovalProcessedEvents := consumer.NewProcessedEvents(rawPool, "member_removal")
 
-	svc := service.NewACLService(repo, checker, aclCache, svcMetrics, logger, tel.Tracer)
+	svc := service.NewACLService(repo, checker, aclCache, svcMetrics, logger, tracer)
 	handler := httpadapter.NewHandler(svc)
 	docs := httpadapter.DocsConfig{
 		Environment: cfg.Environment,
 		Enabled:     cfg.DocsEnabled,
 		AuthToken:   cfg.DocsAuthToken,
 	}
-	router := httpadapter.NewRouter(handler, pgPool, aclCache, svcMetrics, logger, tel.Tracer, docs)
+	router := httpadapter.NewRouter(handler, pgPool, aclCache, svcMetrics, logger, tracing, docs)
 
 	httpServer := &http.Server{
 		Addr:              ":" + cfg.HTTPPort,
@@ -141,7 +169,7 @@ func run() error {
 		ReadHeaderTimeout: 5 * time.Second,
 	}
 
-	offboardingConsumer := consumer.NewOffboardingConsumer(repo, offboardingProcessedEvents, svcMetrics, logger, tel.Tracer)
+	offboardingConsumer := consumer.NewOffboardingConsumer(repo, offboardingProcessedEvents, svcMetrics, logger, tracer)
 	eventsConsumer, err := events.NewSQSConsumer(
 		events.SQSConfig{
 			QueueURL: cfg.SQSQueueURL,
@@ -149,7 +177,15 @@ func run() error {
 		},
 		offboardingConsumer.Handle,
 		events.WithConcurrency(getEnvInt("CONSUMER_CONCURRENCY", 4)),
-		events.WithMaxReceiveCount(5),
+		// No WithMaxReceiveCount/WithDeadLetterHandler here: redrive after
+		// maxReceiveCount=5 is handled entirely by tenant-lifecycle-tenderacl-q's
+		// own SQS redrive policy (deploy/iam/README.md — this pod has no
+		// SQS permissions on either DLQ, so an in-process dead-letter
+		// handler would have nothing to do with a message anyway).
+		// WithMaxReceiveCount without a paired WithDeadLetterHandler is a
+		// no-op in platform-events (the library only consults it when a
+		// dead-letter handler is registered) — a prior version of this
+		// call set it anyway, which did nothing.
 	)
 	if err != nil {
 		return fmt.Errorf("build tenant-lifecycle-tenderacl-q consumer: %w", err)
@@ -161,7 +197,7 @@ func run() error {
 	// offboarding one above, not a discriminated payload on the same
 	// queue, so each cascade's failure mode (and DLQ depth alert) stays
 	// independently observable.
-	memberRemovalConsumer := consumer.NewMemberRemovalConsumer(repo, memberRemovalProcessedEvents, svcMetrics, logger, tel.Tracer)
+	memberRemovalConsumer := consumer.NewMemberRemovalConsumer(repo, memberRemovalProcessedEvents, svcMetrics, logger, tracer)
 	memberRemovalEventsConsumer, err := events.NewSQSConsumer(
 		events.SQSConfig{
 			QueueURL: cfg.MemberRemovalQueueURL,
@@ -169,7 +205,8 @@ func run() error {
 		},
 		memberRemovalConsumer.Handle,
 		events.WithConcurrency(getEnvInt("CONSUMER_CONCURRENCY", 4)),
-		events.WithMaxReceiveCount(5),
+		// See the offboarding consumer above: redrive is member-removal-tenderacl-q's
+		// own SQS redrive policy, not an in-process WithDeadLetterHandler.
 	)
 	if err != nil {
 		return fmt.Errorf("build member-removal-tenderacl-q consumer: %w", err)

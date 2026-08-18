@@ -32,7 +32,6 @@ import (
 	"github.com/BCBP-SOLUTIONS-FZC-LLC/iam-tender-acl/internal/core/service"
 	"github.com/BCBP-SOLUTIONS-FZC-LLC/iam-tender-acl/test/testutil"
 
-	noopmetric "go.opentelemetry.io/otel/metric/noop"
 	nooptrace "go.opentelemetry.io/otel/trace/noop"
 )
 
@@ -99,7 +98,7 @@ func runTestMain(m *testing.M) int {
 	aclCache := valkey.NewCache(rawRedis)
 
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-	svcMetrics, err := metrics.NewMetrics(noopmetric.NewMeterProvider().Meter("e2e"))
+	svcMetrics, err := metrics.NewMetrics()
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "build metrics:", err)
 		return 1
@@ -109,7 +108,7 @@ func runTestMain(m *testing.M) int {
 	repo := aclpostgres.NewTenderACLRepository(pgPool)
 	svc := service.NewACLService(repo, fakeChecks, aclCache, svcMetrics, logger, tracer)
 	h := httpadapter.NewHandler(svc)
-	router := httpadapter.NewRouter(h, pgPool, aclCache, svcMetrics, logger, tracer, httpadapter.DocsConfig{Environment: "development"})
+	router := httpadapter.NewRouter(h, pgPool, aclCache, svcMetrics, logger, nil, httpadapter.DocsConfig{Environment: "development"})
 	handler = router.Handler()
 
 	return m.Run()

@@ -27,12 +27,14 @@ type TenderACLRepository interface {
 	// insert would violate uq_tae_active_entry.
 	Grant(ctx context.Context, entry domain.TenderACLEntry) (domain.TenderACLEntry, error)
 
-	// Revoke implements TAC-3 exactly as iam-org-membership's original
-	// code did: a plain soft-delete with no record_version check (see
-	// service.ACLService.Revoke's doc comment). found reports whether an
-	// active row existed to revoke — its absence is not an error, matching
-	// this table's idempotent-in-effect revoke semantics (LLD §12.2).
-	Revoke(ctx context.Context, tenantID, tenderID, userID uuid.UUID) (found bool, err error)
+	// Revoke implements TAC-3's write: a soft-delete gated on
+	// expectedVersion matching the row's current record_version (LLD
+	// §11.2/§12.1). Returns a *domain.Error with
+	// ErrCodeOptimisticLockConflict if zero rows matched — whether because
+	// the version is stale, the row was already revoked, or no such row
+	// ever existed; the LLD's own sequence diagram does not distinguish
+	// these cases, so neither does this method.
+	Revoke(ctx context.Context, tenantID, tenderID, userID uuid.UUID, expectedVersion int64) error
 
 	// FindActive implements the TAE-3 predicate for TAC-4/I-12. Returns
 	// (nil, nil) when no active grant exists — this is never an error.

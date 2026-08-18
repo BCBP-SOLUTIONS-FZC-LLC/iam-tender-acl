@@ -6,8 +6,6 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
-	"go.opentelemetry.io/contrib/instrumentation/github.com/gin-gonic/gin/otelgin"
-	"go.opentelemetry.io/otel/trace"
 
 	swaggerFiles "github.com/swaggo/files"
 	ginSwagger "github.com/swaggo/gin-swagger"
@@ -72,18 +70,24 @@ func mapToArgs(fields map[string]interface{}) []any {
 // via RequestContext.Roles), the internal mTLS-only access-check API
 // (TAC-4, no RBAC — tenant isolation from RLS alone), and the health
 // checks.
-func NewRouter(h *Handler, postgres, cache Pinger, m *metrics.Metrics, logger *slog.Logger, _ trace.Tracer, docs DocsConfig) *Router {
+func NewRouter(h *Handler, postgres, cache Pinger, m *metrics.Metrics, logger *slog.Logger, tracing *gincommon.TracingOptions, docs DocsConfig) *Router {
 	gin.SetMode(gin.ReleaseMode)
 	engine := gin.New()
-	engine.Use(otelgin.Middleware("tender-acl"))
 	engine.Use(metricsMiddleware(m))
 
 	platformLogger := slogPlatformLogger{l: logger}
-	cfg := gincommon.Config{Logger: platformLogger, ServiceName: "tender-acl"}
+	cfg := gincommon.Config{Logger: platformLogger, ServiceName: "tender-acl", Tracing: tracing}
 	// Observability (recovery/request-id/tracing/correlation/metrics/logging)
 	// applies to every route, including TAC-4. Auth (ProtectedMiddlewares)
 	// applies only to the public admin group below — TAC-4 is a mesh-only
 	// trust boundary with no RBAC/JWT check (LLD §8.2/§13.2).
+	//
+	// Tracing comes entirely from gincommon's own TracingMiddleware here
+	// (part of ObservabilityMiddlewares), which lazily installs a real OTel
+	// TracerProvider (via cfg.Tracing) the first time this function runs —
+	// NOT a separate otelgin.Middleware or a hand-rolled TracerProvider in
+	// cmd/tender-acl, both since removed as redundant with what gincommon
+	// already provides.
 	engine.Use(gincommon.ObservabilityMiddlewares(cfg)...)
 
 	public := engine.Group("/api/v1/tenants/:id/tenders/:tender_id/acl")
@@ -102,7 +106,10 @@ func NewRouter(h *Handler, postgres, cache Pinger, m *metrics.Metrics, logger *s
 	internalGroup.GET("/:user_id", h.CheckAccess)
 
 	hc := &healthHandlers{postgres: postgres, cache: cache}
-	engine.GET("/healthz", hc.healthz)
+	// healthz is gincommon.HealthHandler() itself, not a local
+	// reimplementation — a shared-library reuse audit found this route
+	// used to reproduce that handler's exact {"status":"ok"} body by hand.
+	engine.GET("/healthz", gincommon.HealthHandler())
 	engine.GET("/readyz", hc.readyz)
 
 	registerDocsRoutes(engine, docs)

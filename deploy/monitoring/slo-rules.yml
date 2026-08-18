@@ -44,12 +44,20 @@ groups:
     interval: 30s
     rules:
       # TAC-4 latency histogram → error budget window.
+      #
+      # le="0.02", not "0.020" — Prometheus's `le` bucket label is the exact
+      # string client_golang/OTel expose for the boundary's float64 value
+      # (Go's minimal-digits formatting), and PromQL label matching is a
+      # verbatim string match, not numeric — "0.020" never matches a stored
+      # "0.02" label, silently returning no data rather than an error. A
+      # metrics-instrumentation audit caught this discrepancy live against
+      # the actual /metrics output; fixed here.
       - record: tender_acl:tac4_latency_sli:ratio_rate_5m
         expr: |
           sum(rate(tender_acl_request_duration_seconds_bucket{
             job="tender-acl",
             path=~".*/internal/.*acl.*",
-            le="0.020"
+            le="0.02"
           }[5m]))
           /
           clamp_min(sum(rate(tender_acl_request_duration_seconds_count{
@@ -62,7 +70,7 @@ groups:
           sum(rate(tender_acl_request_duration_seconds_bucket{
             job="tender-acl",
             path=~".*/internal/.*acl.*",
-            le="0.020"
+            le="0.02"
           }[1h]))
           /
           clamp_min(sum(rate(tender_acl_request_duration_seconds_count{

@@ -62,12 +62,10 @@ func TestRepository_Revoke_ThenReGrant_Succeeds(t *testing.T) {
 		TenantID: tenantID, TenderID: tenderID, UserID: userID,
 		TenantMembershipID: uuid.New(), AccessLevel: domain.ACLView, GrantedBy: uuid.New(),
 	}
-	_, err := repo.Grant(ctx, entry)
+	created, err := repo.Grant(ctx, entry)
 	require.NoError(t, err)
 
-	found, err := repo.Revoke(ctx, tenantID, tenderID, userID)
-	require.NoError(t, err)
-	assert.True(t, found)
+	require.NoError(t, repo.Revoke(ctx, tenantID, tenderID, userID, created.RecordVersion))
 
 	// TAE-2: after revoke (deleted_at set), a fresh grant for the same
 	// (tenant, tender, user) must succeed — the partial unique index only
@@ -76,30 +74,62 @@ func TestRepository_Revoke_ThenReGrant_Succeeds(t *testing.T) {
 	require.NoError(t, err)
 }
 
-func TestRepository_Revoke_NoActiveEntry_ReturnsFoundFalseNotError(t *testing.T) {
+// TestRepository_Revoke_NoActiveEntry_ReturnsOptimisticLockConflict covers
+// LLD §11.2/§12.1: a row that was never granted matches zero rows in the
+// version-gated UPDATE, which the repo cannot distinguish from a stale
+// version — both surface identically as ErrCodeOptimisticLockConflict.
+func TestRepository_Revoke_NoActiveEntry_ReturnsOptimisticLockConflict(t *testing.T) {
 	cleanupTable(t)
-	found, err := repo.Revoke(context.Background(), uuid.New(), uuid.New(), uuid.New())
-	require.NoError(t, err)
-	assert.False(t, found)
+	err := repo.Revoke(context.Background(), uuid.New(), uuid.New(), uuid.New(), 1)
+	require.Error(t, err)
+	code, ok := domain.CodeOf(err)
+	require.True(t, ok)
+	assert.Equal(t, domain.ErrCodeOptimisticLockConflict, code)
 }
 
-func TestRepository_Revoke_Idempotent_SecondCallReturnsFoundFalse(t *testing.T) {
+// TestRepository_Revoke_StaleVersion_ReturnsOptimisticLockConflict covers
+// the case where the row IS active but the caller's record_version is
+// behind the row's current value.
+func TestRepository_Revoke_StaleVersion_ReturnsOptimisticLockConflict(t *testing.T) {
 	cleanupTable(t)
 	ctx := context.Background()
 	tenantID, tenderID, userID := uuid.New(), uuid.New(), uuid.New()
-	_, err := repo.Grant(ctx, domain.TenderACLEntry{
+	created, err := repo.Grant(ctx, domain.TenderACLEntry{
 		TenantID: tenantID, TenderID: tenderID, UserID: userID,
 		TenantMembershipID: uuid.New(), AccessLevel: domain.ACLView, GrantedBy: uuid.New(),
 	})
 	require.NoError(t, err)
 
-	found1, err := repo.Revoke(ctx, tenantID, tenderID, userID)
-	require.NoError(t, err)
-	assert.True(t, found1)
+	err = repo.Revoke(ctx, tenantID, tenderID, userID, created.RecordVersion+1)
+	require.Error(t, err)
+	code, ok := domain.CodeOf(err)
+	require.True(t, ok)
+	assert.Equal(t, domain.ErrCodeOptimisticLockConflict, code)
+}
 
-	found2, err := repo.Revoke(ctx, tenantID, tenderID, userID)
+// TestRepository_Revoke_Idempotent_RetryWithStaleVersionConflicts covers
+// LLD §12.1: touch_row() bumps record_version on the soft-delete itself
+// (migration 0002), so a second Revoke call reusing the version that
+// succeeded the first time now correctly conflicts rather than silently
+// no-op'ing — a caller must re-read before retrying, exactly like TAC-2's
+// existing optimistic-lock contract.
+func TestRepository_Revoke_Idempotent_RetryWithStaleVersionConflicts(t *testing.T) {
+	cleanupTable(t)
+	ctx := context.Background()
+	tenantID, tenderID, userID := uuid.New(), uuid.New(), uuid.New()
+	created, err := repo.Grant(ctx, domain.TenderACLEntry{
+		TenantID: tenantID, TenderID: tenderID, UserID: userID,
+		TenantMembershipID: uuid.New(), AccessLevel: domain.ACLView, GrantedBy: uuid.New(),
+	})
 	require.NoError(t, err)
-	assert.False(t, found2, "revoking an already-revoked entry is not an error, per LLD §12.2")
+
+	require.NoError(t, repo.Revoke(ctx, tenantID, tenderID, userID, created.RecordVersion))
+
+	err = repo.Revoke(ctx, tenantID, tenderID, userID, created.RecordVersion)
+	require.Error(t, err, "retrying with the pre-revoke version must conflict, not silently no-op")
+	code, ok := domain.CodeOf(err)
+	require.True(t, ok)
+	assert.Equal(t, domain.ErrCodeOptimisticLockConflict, code)
 }
 
 func TestRepository_FindActive_ExcludesExpiredEntries(t *testing.T) {
@@ -132,13 +162,12 @@ func TestRepository_List_IncludesExpiredButNotRevoked(t *testing.T) {
 	require.NoError(t, err)
 
 	revokedUser := uuid.New()
-	_, err = repo.Grant(ctx, domain.TenderACLEntry{
+	revokedCreated, err := repo.Grant(ctx, domain.TenderACLEntry{
 		TenantID: tenantID, TenderID: tenderID, UserID: revokedUser,
 		TenantMembershipID: uuid.New(), AccessLevel: domain.ACLView, GrantedBy: uuid.New(),
 	})
 	require.NoError(t, err)
-	_, err = repo.Revoke(ctx, tenantID, tenderID, revokedUser)
-	require.NoError(t, err)
+	require.NoError(t, repo.Revoke(ctx, tenantID, tenderID, revokedUser, revokedCreated.RecordVersion))
 
 	entries, err := repo.List(ctx, tenantID, tenderID)
 	require.NoError(t, err)

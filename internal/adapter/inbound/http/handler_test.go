@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -74,7 +75,7 @@ func plainMemberCtx(tenantID uuid.UUID) *RequestContext {
 type fakeRepo struct {
 	listFn                   func(ctx context.Context, tenantID, tenderID uuid.UUID) ([]domain.TenderACLEntry, error)
 	grantFn                  func(ctx context.Context, entry domain.TenderACLEntry) (domain.TenderACLEntry, error)
-	revokeFn                 func(ctx context.Context, tenantID, tenderID, userID uuid.UUID) (bool, error)
+	revokeFn                 func(ctx context.Context, tenantID, tenderID, userID uuid.UUID, expectedVersion int64) error
 	findActiveFn             func(ctx context.Context, tenantID, tenderID, userID uuid.UUID) (*domain.TenderACLEntry, error)
 	cascadeDeleteForTenantFn func(ctx context.Context, tenantID uuid.UUID) (int64, error)
 	softDeleteForUserFn      func(ctx context.Context, tenantID, userID uuid.UUID) (int64, error)
@@ -86,8 +87,8 @@ func (f *fakeRepo) List(ctx context.Context, tenantID, tenderID uuid.UUID) ([]do
 func (f *fakeRepo) Grant(ctx context.Context, entry domain.TenderACLEntry) (domain.TenderACLEntry, error) {
 	return f.grantFn(ctx, entry)
 }
-func (f *fakeRepo) Revoke(ctx context.Context, tenantID, tenderID, userID uuid.UUID) (bool, error) {
-	return f.revokeFn(ctx, tenantID, tenderID, userID)
+func (f *fakeRepo) Revoke(ctx context.Context, tenantID, tenderID, userID uuid.UUID, expectedVersion int64) error {
+	return f.revokeFn(ctx, tenantID, tenderID, userID, expectedVersion)
 }
 func (f *fakeRepo) FindActive(ctx context.Context, tenantID, tenderID, userID uuid.UUID) (*domain.TenderACLEntry, error) {
 	return f.findActiveFn(ctx, tenantID, tenderID, userID)
@@ -153,6 +154,8 @@ type fakeMetrics struct{}
 func (fakeMetrics) RecordGrantCheck(context.Context, string)    {}
 func (fakeMetrics) RecordCheckCall(context.Context, string)     {}
 func (fakeMetrics) RecordWrite(context.Context, string, string) {}
+func (fakeMetrics) RecordCacheHit(context.Context)              {}
+func (fakeMetrics) RecordCacheMiss(context.Context)             {}
 
 func newTestHandler(repo port.TenderACLRepository, checker port.MembershipCheckClient, c port.Cache, t *testing.T) *Handler {
 	t.Helper()
@@ -169,8 +172,8 @@ func emptyRepo() *fakeRepo {
 			e.ID = uuid.New()
 			return e, nil
 		},
-		revokeFn: func(context.Context, uuid.UUID, uuid.UUID, uuid.UUID) (bool, error) {
-			return true, nil
+		revokeFn: func(context.Context, uuid.UUID, uuid.UUID, uuid.UUID, int64) error {
+			return nil
 		},
 	}
 }
@@ -353,10 +356,14 @@ func TestHandler_Grant_DuplicateGrant_Returns409(t *testing.T) {
 
 // ── Revoke (TAC-3) ───────────────────────────────────────────────────────
 
+func revokeBody(version int64) string {
+	return `{"record_version":` + strconv.FormatInt(version, 10) + `}`
+}
+
 func TestHandler_Revoke_InvalidTenantID_Returns400(t *testing.T) {
 	h := newTestHandler(emptyRepo(), &fakeChecker{}, &fakeCache{}, t)
 	tenant := uuid.New()
-	c, w := buildCtx(http.MethodDelete, "/", ``, tenantOwnerCtx(tenant))
+	c, w := buildCtx(http.MethodDelete, "/", revokeBody(1), tenantOwnerCtx(tenant))
 	setParams(c, "id", "bad-uuid", "tender_id", uuid.New().String(), "user_id", uuid.New().String())
 	h.Revoke(c)
 	assertErrorCode(t, w, http.StatusBadRequest, domain.ErrCodeInvalidRequest)
@@ -365,7 +372,7 @@ func TestHandler_Revoke_InvalidTenantID_Returns400(t *testing.T) {
 func TestHandler_Revoke_InvalidTenderID_Returns400(t *testing.T) {
 	h := newTestHandler(emptyRepo(), &fakeChecker{}, &fakeCache{}, t)
 	tenant := uuid.New()
-	c, w := buildCtx(http.MethodDelete, "/", ``, tenantOwnerCtx(tenant))
+	c, w := buildCtx(http.MethodDelete, "/", revokeBody(1), tenantOwnerCtx(tenant))
 	setParams(c, "id", tenant.String(), "tender_id", "bad-uuid", "user_id", uuid.New().String())
 	h.Revoke(c)
 	assertErrorCode(t, w, http.StatusBadRequest, domain.ErrCodeInvalidRequest)
@@ -374,7 +381,7 @@ func TestHandler_Revoke_InvalidTenderID_Returns400(t *testing.T) {
 func TestHandler_Revoke_InvalidUserID_Returns400(t *testing.T) {
 	h := newTestHandler(emptyRepo(), &fakeChecker{}, &fakeCache{}, t)
 	tenant := uuid.New()
-	c, w := buildCtx(http.MethodDelete, "/", ``, tenantOwnerCtx(tenant))
+	c, w := buildCtx(http.MethodDelete, "/", revokeBody(1), tenantOwnerCtx(tenant))
 	setParams(c, "id", tenant.String(), "tender_id", uuid.New().String(), "user_id", "bad-uuid")
 	h.Revoke(c)
 	assertErrorCode(t, w, http.StatusBadRequest, domain.ErrCodeInvalidRequest)
@@ -383,7 +390,7 @@ func TestHandler_Revoke_InvalidUserID_Returns400(t *testing.T) {
 func TestHandler_Revoke_PlainMember_Returns403(t *testing.T) {
 	h := newTestHandler(emptyRepo(), &fakeChecker{}, &fakeCache{}, t)
 	tenant := uuid.New()
-	c, w := buildCtx(http.MethodDelete, "/", ``, plainMemberCtx(tenant))
+	c, w := buildCtx(http.MethodDelete, "/", revokeBody(1), plainMemberCtx(tenant))
 	setParams(c, "id", tenant.String(), "tender_id", uuid.New().String(), "user_id", uuid.New().String())
 	h.Revoke(c)
 	assertErrorCode(t, w, http.StatusForbidden, domain.ErrCodeInsufficientRole)
@@ -391,17 +398,26 @@ func TestHandler_Revoke_PlainMember_Returns403(t *testing.T) {
 
 func TestHandler_Revoke_CrossTenant_Returns403(t *testing.T) {
 	h := newTestHandler(emptyRepo(), &fakeChecker{}, &fakeCache{}, t)
-	c, w := buildCtx(http.MethodDelete, "/", ``, tenantOwnerCtx(uuid.New()))
+	c, w := buildCtx(http.MethodDelete, "/", revokeBody(1), tenantOwnerCtx(uuid.New()))
 	pathTenant := uuid.New()
 	setParams(c, "id", pathTenant.String(), "tender_id", uuid.New().String(), "user_id", uuid.New().String())
 	h.Revoke(c)
 	assertErrorCode(t, w, http.StatusForbidden, domain.ErrCodeInsufficientRole)
 }
 
+func TestHandler_Revoke_MissingRecordVersion_Returns400(t *testing.T) {
+	h := newTestHandler(emptyRepo(), &fakeChecker{}, &fakeCache{}, t)
+	tenant := uuid.New()
+	c, w := buildCtx(http.MethodDelete, "/", `{}`, tenderAdminCtx(tenant))
+	setParams(c, "id", tenant.String(), "tender_id", uuid.New().String(), "user_id", uuid.New().String())
+	h.Revoke(c)
+	assertErrorCode(t, w, http.StatusBadRequest, domain.ErrCodeInvalidRequest)
+}
+
 func TestHandler_Revoke_TenderAdmin_Returns204(t *testing.T) {
 	h := newTestHandler(emptyRepo(), &fakeChecker{}, &fakeCache{}, t)
 	tenant := uuid.New()
-	c, _ := buildCtx(http.MethodDelete, "/", ``, tenderAdminCtx(tenant))
+	c, _ := buildCtx(http.MethodDelete, "/", revokeBody(1), tenderAdminCtx(tenant))
 	setParams(c, "id", tenant.String(), "tender_id", uuid.New().String(), "user_id", uuid.New().String())
 	h.Revoke(c)
 	// c.Writer.Status(), not the raw httptest recorder code: c.Status()
@@ -410,20 +426,19 @@ func TestHandler_Revoke_TenderAdmin_Returns204(t *testing.T) {
 	assert.Equal(t, http.StatusNoContent, c.Writer.Status())
 }
 
-// TestHandler_Revoke_AlreadyRevoked_StillReturns204 covers the "idempotent
-// in effect" contract at the handler layer: a repo reporting found=false
-// (nothing to revoke) is still a successful 204, not a 404 (LLD §12.2 — no
-// optimistic-lock/not-found distinction on Revoke, see
-// IMPLEMENTATION_GAP_ANALYSIS.md).
-func TestHandler_Revoke_AlreadyRevoked_StillReturns204(t *testing.T) {
+// TestHandler_Revoke_VersionConflict_Returns409 covers the optimistic-lock
+// contract at the handler layer (LLD §11.2/§12.1): a repo reporting zero
+// rows affected — whether from a stale version or an already-revoked row —
+// surfaces as 409 optimistic_lock_conflict, not a silent 204.
+func TestHandler_Revoke_VersionConflict_Returns409(t *testing.T) {
 	repo := emptyRepo()
-	repo.revokeFn = func(context.Context, uuid.UUID, uuid.UUID, uuid.UUID) (bool, error) {
-		return false, nil
+	repo.revokeFn = func(context.Context, uuid.UUID, uuid.UUID, uuid.UUID, int64) error {
+		return domain.NewError(domain.ErrCodeOptimisticLockConflict, "record version conflict")
 	}
 	h := newTestHandler(repo, &fakeChecker{}, &fakeCache{}, t)
 	tenant := uuid.New()
-	c, _ := buildCtx(http.MethodDelete, "/", ``, tenderAdminCtx(tenant))
+	c, w := buildCtx(http.MethodDelete, "/", revokeBody(1), tenderAdminCtx(tenant))
 	setParams(c, "id", tenant.String(), "tender_id", uuid.New().String(), "user_id", uuid.New().String())
 	h.Revoke(c)
-	assert.Equal(t, http.StatusNoContent, c.Writer.Status())
+	assertErrorCode(t, w, http.StatusConflict, domain.ErrCodeOptimisticLockConflict)
 }

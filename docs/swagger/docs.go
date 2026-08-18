@@ -204,7 +204,10 @@ const docTemplate = `{
                         "TenantRoles": []
                     }
                 ],
-                "description": "Soft-delete, idempotent in effect — revoking an already-revoked (or never-granted) entry is not an error.",
+                "description": "Soft-delete, optimistic-locked on the caller's last-read record_version (LLD §11.2/§12.1) — a version mismatch, including against an already-revoked row, returns 409 optimistic_lock_conflict.",
+                "consumes": [
+                    "application/json"
+                ],
                 "tags": [
                     "public"
                 ],
@@ -233,6 +236,15 @@ const docTemplate = `{
                         "name": "user_id",
                         "in": "path",
                         "required": true
+                    },
+                    {
+                        "description": "Last-read record_version",
+                        "name": "body",
+                        "in": "body",
+                        "required": true,
+                        "schema": {
+                            "$ref": "#/definitions/http.RevokeRequest"
+                        }
                     }
                 ],
                 "responses": {
@@ -250,27 +262,11 @@ const docTemplate = `{
                         "schema": {
                             "$ref": "#/definitions/http.ErrorResponse"
                         }
-                    }
-                }
-            }
-        },
-        "/healthz": {
-            "get": {
-                "produces": [
-                    "application/json"
-                ],
-                "tags": [
-                    "infra"
-                ],
-                "summary": "Liveness check",
-                "responses": {
-                    "200": {
-                        "description": "OK",
+                    },
+                    "409": {
+                        "description": "Conflict",
                         "schema": {
-                            "type": "object",
-                            "additionalProperties": {
-                                "type": "string"
-                            }
+                            "$ref": "#/definitions/http.ErrorResponse"
                         }
                     }
                 }
@@ -455,6 +451,17 @@ const docTemplate = `{
                     "items": {
                         "$ref": "#/definitions/http.ACLResponse"
                     }
+                }
+            }
+        },
+        "http.RevokeRequest": {
+            "type": "object",
+            "required": [
+                "record_version"
+            ],
+            "properties": {
+                "record_version": {
+                    "type": "integer"
                 }
             }
         }

@@ -10,6 +10,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"go.opentelemetry.io/otel/trace"
 )
 
 func TestHTTPChecker_Exists_Active(t *testing.T) {
@@ -33,6 +34,33 @@ func TestHTTPChecker_Exists_Active(t *testing.T) {
 	assert.Equal(t, "/internal/tenants/"+tenantID.String()+"/members/"+userID.String()+"/exists", gotPath)
 	assert.Equal(t, "iam-system", gotUserID, "must authenticate as the reserved iam-system principal")
 	assert.Equal(t, "iam-system", gotUserRoles)
+}
+
+// TestHTTPChecker_Exists_PropagatesTraceparent covers the fix linking this
+// outbound call's span to Core's, so a request into tender-acl that
+// triggers TAC-2's grant-time check shows as one connected trace instead of
+// two disconnected ones.
+func TestHTTPChecker_Exists_PropagatesTraceparent(t *testing.T) {
+	var gotTraceparent string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotTraceparent = r.Header.Get("traceparent")
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{"active": true})
+	}))
+	defer server.Close()
+
+	traceID, _ := trace.TraceIDFromHex("0102030405060708090a0b0c0d0e0f10")
+	spanID, _ := trace.SpanIDFromHex("1112131415161718")
+	sc := trace.NewSpanContext(trace.SpanContextConfig{
+		TraceID: traceID, SpanID: spanID,
+		TraceFlags: trace.FlagsSampled, Remote: true,
+	})
+	ctx := trace.ContextWithSpanContext(t.Context(), sc)
+
+	checker := NewHTTPChecker(server.URL, nil, 0)
+	_, _, err := checker.Exists(ctx, uuid.New(), uuid.New())
+	require.NoError(t, err)
+	assert.Equal(t, "00-0102030405060708090a0b0c0d0e0f10-1112131415161718-01", gotTraceparent)
 }
 
 func TestHTTPChecker_Exists_NotActive(t *testing.T) {

@@ -15,32 +15,37 @@ files are repo-relative to `iam-tender-acl` unless prefixed `iam-org-membership/
 | TAC-3 `DELETE .../acl/:user_id` | O&M's P-23 (`acl_handler.go`'s `Revoke`) | Ported to `service.ACLService.Revoke`/`httpadapter.Handler.Revoke`, returns `204 No Content` | Low, see optimistic-lock discrepancy below | `internal/core/service/acl_service.go`, `internal/adapter/inbound/http/handler.go` |
 | TAC-4 `GET /internal/.../acl/:user_id` | O&M's I-12 (`internal_handler.go`'s `CheckTenderAccess`, registered without a `/api/v1` prefix at `cmd/server/main.go:519`) | Ported to `httpadapter.Handler.CheckAccess`, registered at `GET /internal/tenants/:id/tenders/:tender_id/acl/:user_id` (no `/api/v1` prefix) | Low — response contract (`has_access`/`access_level`/`expires_at`, never 404) byte-identical | `internal/adapter/inbound/http/internal_handler.go` |
 
-## Discrepancy 1 — Optimistic-lock check on TAC-3 Revoke (LLD §12.1/§7.2.1 vs. actual code)
+## Discrepancy 1 — Optimistic-lock check on TAC-3 Revoke (LLD §12.1/§7.2.1 vs. actual code) — RESOLVED
 
 **LLD text**: §12.1/§7.2.1 specify a client-supplied `record_version` check on TAC-3 — the caller
 sends the version it last read, `UPDATE ... WHERE id=$1 AND record_version=$2`, and zero rows
 affected → `409 optimistic_lock_conflict`.
 
-**Actual code (both O&M's source and this build)**: `Revoke()` is a plain, unconditional
-`UPDATE tender_acl_entries SET deleted_at = now() WHERE tenant_id=$1 AND tender_id=$2 AND
-user_id=$3 AND deleted_at IS NULL` — no version parameter, no lock check, no `409` path reachable
-from this method. Confirmed by reading O&M's actual `tender_acl_repository.go` directly (not
-assumed from the LLD).
+**History**: this discrepancy originally recorded that `Revoke()` (both O&M's source and this
+repo's initial build) was a plain, unconditional `UPDATE ... WHERE tenant_id=$1 AND tender_id=$2
+AND user_id=$3 AND deleted_at IS NULL` — no version parameter, no lock check, no `409` path
+reachable — and that this repo deliberately preserved that unchanged behavior per ADR-0007's
+"preserve every... behaviour... unchanged" instruction (LLD §2), treating the check as a follow-up
+requiring its own review rather than something to add silently.
 
-**Decision made in this build**: preserve O&M's current behavior unchanged, per ADR-0007's
-"preserve every... behaviour... unchanged" instruction (LLD §2) — do **not** add
-caller-visible optimistic-lock behavior nobody currently sends a `record_version` for. The
-`record_version` column and its trigger-driven bump (`trg_touch_tae`) are still installed (LLD's
-own schema addition — see below), so the schema is forward-compatible with adding the check later,
-but nothing gates on it today. `ErrCodeOptimisticLockConflict`/`409` is defined in
-`internal/core/domain/errors.go` for forward-compatibility but is currently unreachable dead code from any
-live path.
+**Now implemented**: `Revoke()` (`internal/adapter/outbound/postgres/repository.go`) gates the
+`UPDATE` on `record_version = $4` (the caller's last-read version), matching the LLD's §11.2/§12.1
+text exactly. Zero rows affected (stale version, already revoked, or no such row) returns
+`ErrCodeOptimisticLockConflict`/`409`, which is no longer dead code — it is exercised by both
+`TestHandler_Revoke_VersionConflict_Returns409` (unit) and `TestE2E_RevokeStaleVersion_Returns409`
+(e2e, real Postgres).
 
-**Recommendation, not a decision**: if the optimistic-lock check should genuinely be added (e.g.
-because some admin UI already tracks a version and expects the 409), that is a follow-up call
-requiring its own review — not something to silently add in this pass.
+**Caller-visible breaking change**: TAC-3's request contract changed from no body to a required
+JSON body — `RevokeRequest{RecordVersion int64 `+"`binding:\"required\"`"+`}` (`internal/adapter/inbound/http/dto.go`).
+A `DELETE .../acl/:user_id` call with no body (or missing `record_version`) now returns `400
+invalid_request` instead of the previous unconditional `204`. This also means a repeat revoke of an
+already-revoked row is no longer a no-op `204` — it now returns `409` on a version mismatch, since
+the row's `record_version` no longer matches whatever the caller last read. Any admin-tooling
+caller must be updated to track and send `record_version` (returned on every `ACLResponse`, e.g.
+from TAC-1's `List`) before this ships to a caller that doesn't already do so.
 
-Affected files: `internal/core/service/acl_service.go` (`Revoke`, has an inline comment pointing here),
+Affected files: `internal/adapter/outbound/postgres/repository.go` (`Revoke`),
+`internal/core/service/acl_service.go`, `internal/adapter/inbound/http/handler.go`/`dto.go`,
 `internal/adapter/outbound/postgres/migrations/0003_tender_acl_entries.up.sql`.
 
 ## Discrepancy 2 — Stale doc comment in O&M's source (found during research, independent of Discrepancy 1)
@@ -149,7 +154,7 @@ so a future LLD revision fixes §8.4, not §8.3.
 | `invalid_reason` | 422 | 422 | ✅ |
 | `invalid_expiry` | 422 | 422 | ✅ |
 | `grantee_not_active_member` | 422 | 422 | ✅ |
-| `optimistic_lock_conflict` | 409 | 409 | ✅ (defined, currently unreachable — see Discrepancy 1) |
+| `optimistic_lock_conflict` | 409 | 409 | ✅ (returned by Revoke on a `record_version` mismatch — see Discrepancy 1) |
 | `duplicate_grant` | 409 | 409 | ✅ |
 | `core_unavailable` | 503 | 503 | ✅ |
 | `dependency_unavailable` | 503 | 503 | ✅ |
@@ -164,7 +169,7 @@ contradicting it.
 
 | Addition | LLD basis | Status |
 |---|---|---|
-| `record_version bigint NOT NULL DEFAULT 1 CHECK (record_version > 0)` | §7.2.1/§12.1 | Implemented. Column + trigger bump present; not yet gated on by Revoke (Discrepancy 1). |
+| `record_version bigint NOT NULL DEFAULT 1 CHECK (record_version > 0)` | §7.2.1/§12.1 | Implemented. Column + trigger bump present, and gated on by Revoke (Discrepancy 1, resolved). |
 | `reason CHECK (reason IS NULL OR char_length(reason) <= 500)` | §7.2.1, explicitly flagged by the LLD itself as "an LLD addition — the source schema left `reason` an unbounded text column" | Implemented, both at the DB layer (this CHECK) and the service layer (`maxReasonLength` in `internal/core/service/acl_service.go`). Not a caller-visible behavior change since the service-layer validation already enforced the same 500-char cap — this is defense-in-depth, not new-observable behavior. |
 | Trigger name `trg_touch_tae` (LLD §7.5, verbatim) vs. O&M's current `trg_touch_tender_acl_entries` | §7.5 | Implemented using the LLD's name — the LLD is authoritative per this task's own instruction; the naming difference is cosmetic (same `touch_row()` function, same behavior) but recorded here for anyone diffing the two repos' migrations. |
 | RLS policy hardening: `NULLIF(current_setting('app.tenant_id', true), '')::uuid` vs. the LLD's literal simpler `current_setting('app.tenant_id', true)::uuid` (§7.3) | Gap-3 instruction: match `iam-group-mapping`'s RLS migration exactly | Implemented using the hardened `NULLIF` form — `iam-group-mapping`'s own RLS test suite

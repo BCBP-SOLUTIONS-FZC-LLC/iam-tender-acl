@@ -65,6 +65,13 @@ definitions:
           $ref: '#/definitions/http.ACLResponse'
         type: array
     type: object
+  http.RevokeRequest:
+    properties:
+      record_version:
+        type: integer
+    required:
+    - record_version
+    type: object
 info:
   contact:
     name: BCBP Solutions
@@ -182,8 +189,11 @@ paths:
       - public
   /api/v1/tenants/{id}/tenders/{tender_id}/acl/{user_id}:
     delete:
-      description: Soft-delete, idempotent in effect — revoking an already-revoked
-        (or never-granted) entry is not an error.
+      consumes:
+      - application/json
+      description: Soft-delete, optimistic-locked on the caller's last-read record_version
+        (LLD §11.2/§12.1) — a version mismatch, including against an already-revoked
+        row, returns 409 optimistic_lock_conflict.
       parameters:
       - description: Tenant UUID
         format: uuid
@@ -203,6 +213,12 @@ paths:
         name: user_id
         required: true
         type: string
+      - description: Last-read record_version
+        in: body
+        name: body
+        required: true
+        schema:
+          $ref: '#/definitions/http.RevokeRequest'
       responses:
         "204":
           description: No Content
@@ -214,6 +230,10 @@ paths:
           description: Forbidden
           schema:
             $ref: '#/definitions/http.ErrorResponse'
+        "409":
+          description: Conflict
+          schema:
+            $ref: '#/definitions/http.ErrorResponse'
       security:
       - UserID: []
       - TenantID: []
@@ -221,20 +241,6 @@ paths:
       summary: TAC-3 — Revoke a tender ACL entry
       tags:
       - public
-  /healthz:
-    get:
-      produces:
-      - application/json
-      responses:
-        "200":
-          description: OK
-          schema:
-            additionalProperties:
-              type: string
-            type: object
-      summary: Liveness check
-      tags:
-      - infra
   /internal/tenants/{id}/tenders/{tender_id}/acl/{user_id}:
     get:
       description: Mesh-only, no RBAC/JWT check at all. Never 404 — a missing grant

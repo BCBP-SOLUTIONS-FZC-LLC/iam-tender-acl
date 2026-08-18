@@ -201,14 +201,17 @@ func (h *Handler) Grant(c *gin.Context) {
 // Revoke implements TAC-3.
 //
 // @Summary      TAC-3 — Revoke a tender ACL entry
-// @Description  Soft-delete, idempotent in effect — revoking an already-revoked (or never-granted) entry is not an error.
+// @Description  Soft-delete, optimistic-locked on the caller's last-read record_version (LLD §11.2/§12.1) — a version mismatch, including against an already-revoked row, returns 409 optimistic_lock_conflict.
 // @Tags         public
-// @Param        id         path  string  true  "Tenant UUID"  format(uuid)
-// @Param        tender_id  path  string  true  "Tender UUID"  format(uuid)
-// @Param        user_id    path  string  true  "User UUID"    format(uuid)
+// @Accept       json
+// @Param        id         path  string         true  "Tenant UUID"  format(uuid)
+// @Param        tender_id  path  string         true  "Tender UUID"  format(uuid)
+// @Param        user_id    path  string         true  "User UUID"    format(uuid)
+// @Param        body       body  RevokeRequest  true  "Last-read record_version"
 // @Success      204
 // @Failure      400  {object}  ErrorResponse
 // @Failure      403  {object}  ErrorResponse
+// @Failure      409  {object}  ErrorResponse
 // @Security     UserID
 // @Security     TenantID
 // @Security     TenantRoles
@@ -230,7 +233,13 @@ func (h *Handler) Revoke(c *gin.Context) {
 		return
 	}
 
-	if err := h.svc.Revoke(c.Request.Context(), tenantID, tenderID, userID); err != nil {
+	var req RevokeRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		writeError(c, http.StatusBadRequest, domain.ErrCodeInvalidRequest)
+		return
+	}
+
+	if err := h.svc.Revoke(c.Request.Context(), tenantID, tenderID, userID, req.RecordVersion); err != nil {
 		respondACLError(c, err)
 		return
 	}

@@ -19,20 +19,12 @@ type healthHandlers struct {
 	cache    Pinger
 }
 
-// healthz is a pure liveness check: if the process can answer HTTP at all,
-// it reports ok. It never inspects dependencies.
-//
-// @Summary   Liveness check
-// @Tags      infra
-// @Produce   json
-// @Success   200  {object}  map[string]string
-// @Router    /healthz [get]
-func (h *healthHandlers) healthz(c *gin.Context) {
-	c.JSON(http.StatusOK, gin.H{"status": "ok"})
-}
-
-// readyz checks Postgres and Valkey, and reports 503 if either is
-// unreachable. It deliberately does NOT check membershipcheck (LLD
+// readyz checks Postgres and Valkey. Postgres is on the critical path for
+// every route and reports 503 if unreachable. Valkey is not: TAC-4 falls
+// through to Postgres on a cache miss or Valkey error (higher latency, not
+// an outage — TAC-FAIL-2), so a Valkey failure is reported as "degraded"
+// without flipping overall readiness — matching ARCHITECTURE.md's Cache
+// Strategy section. It deliberately does NOT check membershipcheck (LLD
 // TAC-FAIL-1/TAC-FAIL-3): Core's availability only affects TAC-2, never
 // this service's own liveness/readiness posture.
 //
@@ -57,8 +49,7 @@ func (h *healthHandlers) readyz(c *gin.Context) {
 	}
 
 	if err := h.cache.Ping(ctx); err != nil {
-		checks["valkey"] = "error"
-		healthy = false
+		checks["valkey"] = "degraded"
 	} else {
 		checks["valkey"] = "ok"
 	}

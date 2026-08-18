@@ -20,6 +20,7 @@ import (
 	"github.com/redis/go-redis/v9"
 
 	"github.com/BCBP-SOLUTIONS-FZC-LLC/iam-tender-acl/internal/adapter/inbound/consumer"
+	"github.com/BCBP-SOLUTIONS-FZC-LLC/iam-tender-acl/internal/adapter/outbound/metrics"
 	aclpostgres "github.com/BCBP-SOLUTIONS-FZC-LLC/iam-tender-acl/internal/adapter/outbound/postgres"
 	"github.com/BCBP-SOLUTIONS-FZC-LLC/iam-tender-acl/internal/adapter/outbound/valkey"
 	"github.com/BCBP-SOLUTIONS-FZC-LLC/iam-tender-acl/internal/core/port"
@@ -35,6 +36,11 @@ var (
 	processedEvents              *consumer.ProcessedEvents
 	memberRemovalProcessedEvents *consumer.ProcessedEvents
 	appPgcommonPool              *pgcommon.Pool
+	// sharedMetrics is constructed once here, not per-test (see testMetrics
+	// in service_test.go) — prometheus.Register (unlike the previous
+	// OTel-meter-backed instruments) rejects a second registration of the
+	// same metric name against the process-wide default registry.
+	sharedMetrics *metrics.Metrics
 )
 
 func TestMain(m *testing.M) {
@@ -86,6 +92,13 @@ func runTestMain(m *testing.M) int {
 	valkeyClient = valkey.NewClient(valkey.ClientConfig{Addr: valkeyAddr})
 	defer func() { _ = valkeyClient.Close() }()
 	valkeyCache = valkey.NewCache(valkeyClient)
+
+	m2, err := metrics.NewMetrics()
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "build metrics:", err)
+		return 1
+	}
+	sharedMetrics = m2
 
 	return m.Run()
 }

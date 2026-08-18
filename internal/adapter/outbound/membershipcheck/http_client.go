@@ -69,6 +69,7 @@ func (c *HTTPChecker) Exists(ctx context.Context, tenantID, userID uuid.UUID) (b
 		return false, uuid.UUID{}, fmt.Errorf("membershipcheck: build request: %w", err)
 	}
 	setInternalHeaders(req)
+	propagateTraceparent(ctx, req)
 
 	resp, err := c.httpClient.Do(req)
 	if err != nil {

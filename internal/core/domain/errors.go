@@ -4,10 +4,10 @@ import "errors"
 
 // Error codes, matching tender-acl-service-lld.md §20 (Appendix: Error
 // Taxonomy) verbatim. The HTTP adapter's respondACLError is the single
-// place that maps these to status codes — see IMPLEMENTATION_GAP_ANALYSIS.md
-// for the one place this table intentionally omits enforcement
-// (optimistic_lock_conflict, defined here for forward-compatibility with
-// the record_version column but never returned by Revoke today).
+// place that maps these to status codes. optimistic_lock_conflict is
+// returned by Revoke on a record_version mismatch — see
+// IMPLEMENTATION_GAP_ANALYSIS.md's Discrepancy 1 for the history of this
+// check (initially deferred, later implemented per LLD §11.2/§12.1).
 const (
 	ErrCodeInvalidRequest         = "invalid_request"
 	ErrCodeUnauthorized           = "unauthorized"
