@@ -157,13 +157,13 @@ so a future LLD revision fixes §8.4, not §8.3.
 | `optimistic_lock_conflict` | 409 | 409 | ✅ (returned by Revoke on a `record_version` mismatch — see Discrepancy 1) |
 | `duplicate_grant` | 409 | 409 | ✅ |
 | `core_unavailable` | 503 | 503 | ✅ |
-| `dependency_unavailable` | 503 | 503 | ✅ |
+| `dependency_unavailable` | 503 | 503 | ✅ (2026-08-20: was previously **✅ marked in error, not actually reachable** — `wrapConnErr` didn't exist, so a real Postgres/Valkey connectivity failure on TAC-1/3/4 fell through `respondACLError`'s default case to `500`, not `503`. Caught during an asyncapi/swagger-vs-LLD alignment sweep — swagger's hand-written `@Failure` annotations for TAC-1/3/4 correctly omitted `503` at the time, which is what surfaced the mismatch. Fixed: `internal/adapter/outbound/postgres/repository.go`'s `withTenant` now wraps every repository call through `wrapConnErr`, mirroring `iam-user-profile`'s identical helper — a `*domain.Error`, `*pgconn.PgError`, `pgx.ErrNoRows`, or context cancellation passes through unchanged; anything else (connection refused, pool exhausted, etc.) becomes `dependency_unavailable`. `@Failure 503` added to TAC-1/3/4's swagger annotations to match; `make swag` regenerated with zero other drift.) |
 | `internal_server_error` | 500 | 500 | ✅ |
-| `invalid_request` (malformed UUID path params / JSON body) | 400 | not in LLD §20's table | Gap — LLD's Appendix doesn't enumerate a generic malformed-request code; this repo adds one since gincommon's convention requires *some* code for unparseable input. Not a behavior change from O&M (which also 400s on malformed UUIDs), just a code the LLD's Appendix omitted. |
+| `invalid_request` (malformed UUID path params / JSON body) | 400 | 400 (added to the LLD's Appendix 2026-08-19) | ✅ |
 
-**Conclusion: fully aligned** with LLD §20 for every code the LLD actually enumerates; the one
-addition (`invalid_request`/400) fills a gap the Appendix table left implicit rather than
-contradicting it.
+**Conclusion: fully aligned** with LLD §20 for every code the LLD enumerates, now including
+`dependency_unavailable`'s actual reachability on TAC-1/3/4 (fixed 2026-08-20, see above) and
+`invalid_request`/400 (added to the LLD's own Appendix the same sweep).
 
 ## Schema additions beyond O&M's current table (both explicitly called for by the LLD)
 

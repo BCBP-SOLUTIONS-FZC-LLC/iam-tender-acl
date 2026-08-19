@@ -13,6 +13,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 
 	"github.com/BCBP-SOLUTIONS-FZC-LLC/iam-tender-acl/internal/core/domain"
 	"github.com/BCBP-SOLUTIONS-FZC-LLC/iam-tender-acl/internal/core/port"
@@ -28,7 +29,40 @@ import (
 // tenant-offboarding consumer (which has no HTTP request at all).
 func withTenant(ctx context.Context, pool *pgcommon.Pool, tenantID uuid.UUID, fn func(context.Context, pgx.Tx) error) error {
 	ctx = pgcommon.WithGUCSet(ctx, pgdomain.GUCSet{TenantID: tenantID.String()})
-	return pgcommon.RunInTx(ctx, pool, pgx.TxOptions{}, fn)
+	return wrapConnErr(pgcommon.RunInTx(ctx, pool, pgx.TxOptions{}, fn))
+}
+
+// wrapConnErr converts a connectivity failure (network unreachable, pool
+// exhausted, TLS handshake, etc.) into domain.ErrCodeDependencyUnavailable
+// so respondACLError surfaces it as 503, matching LLD §12.3/§20's
+// documented behavior — previously dead code, since nothing in this
+// package classified errors this way and a bare pgx/network error fell
+// through respondACLError's default case to 500 instead. Errors that are
+// already classified (a *domain.Error from IsUniqueViolation/optimistic-lock
+// handling elsewhere in this package), a *pgconn.PgError (the server
+// responded with a SQL error, not a connectivity failure), pgx.ErrNoRows,
+// or a context cancellation/deadline (request-level, not a dependency
+// outage) all pass through unchanged — mirrors iam-user-profile's
+// identical wrapConnErr.
+func wrapConnErr(err error) error {
+	if err == nil {
+		return nil
+	}
+	var de *domain.Error
+	if errors.As(err, &de) {
+		return err
+	}
+	var pgErr *pgconn.PgError
+	if errors.As(err, &pgErr) {
+		return err
+	}
+	if errors.Is(err, pgx.ErrNoRows) {
+		return err
+	}
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return err
+	}
+	return domain.NewError(domain.ErrCodeDependencyUnavailable, "database unavailable: "+err.Error())
 }
 
 // TenderACLRepository implements port.TenderACLRepository against

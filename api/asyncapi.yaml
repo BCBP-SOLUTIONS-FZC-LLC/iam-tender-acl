@@ -188,12 +188,12 @@ components:
         $ref: "#/components/schemas/TenantOffboardedPayload"
       examples:
         - name: TenantOffboardedExample
-          summary: A typical TenantOffboarded event payload.
+          summary: A typical TenantOffboarded event envelope.
           payload:
-            event_id: "d290f1ee-6c54-4b01-90e6-d701748f0851"
-            event_type: "TenantOffboarded"
+            id: "d290f1ee-6c54-4b01-90e6-d701748f0851"
+            type: "TenantOffboarded"
             tenant_id: "a0f2a3c4-1111-4a2b-9c3d-000000000000"
-            occurred_at: "2026-08-14T03:15:00Z"
+            time: "2026-08-14T03:15:00Z"
       x-consumer-schema-dependency:
         # This service is a pure CONSUMER of TenantOffboarded — it does not
         # own, version, or register this schema. There is no Glue Schema
@@ -204,10 +204,10 @@ components:
         # (iam-org-membership's) schema shape explicit, since we have no
         # tooling that would otherwise catch a breaking upstream change.
         depends-on-shape:
-          event_id: uuid
-          event_type: "TenantOffboarded (const)"
+          id: uuid
+          type: "TenantOffboarded (const)"
           tenant_id: uuid
-          occurred_at: date-time
+          time: date-time
         producer-lifecycle-status: unknown
         # We don't control the producer's x-lifecycle state and have no
         # automated visibility into it. If the producer ever deprecates
@@ -239,11 +239,14 @@ components:
         # CONSUMER, no Glue Schema Registry integration (LLD §10.4-style
         # exemption, extended to this new event by ADR-0007 Wave 3 Phase
         # 3). depends-on-shape reflects platform-events' actual
-        # Envelope[T] wire fields (id/type/tenant_id/subject/time), unlike
-        # TenantOffboardedPayload above (which predates this document's
-        # confirmation of the real envelope shape against the published
-        # platform-events library — see IMPLEMENTATION_GAP_ANALYSIS.md for
-        # that reconciliation note).
+        # Envelope[T] wire fields (id/type/tenant_id/subject/time) —
+        # TenantOffboardedPayload above was originally written against a
+        # nested event_id/event_type/occurred_at shape that predated this
+        # document's confirmation of the real envelope against the
+        # published platform-events library; both entries now use the
+        # confirmed-correct top-level shape (see
+        # IMPLEMENTATION_GAP_ANALYSIS.md Discrepancy 6 for that
+        # reconciliation note).
         depends-on-shape:
           id: uuid
           type: "TenantMembershipRemoved (const)"
@@ -255,23 +258,30 @@ components:
   schemas:
     TenantOffboardedPayload:
       type: object
-      description: Payload of the TenantOffboarded event.
+      description: >-
+        Payload of the TenantOffboarded event — this is platform-events'
+        Envelope[T] wire shape directly (fields the producer/library
+        define), not a service-specific data payload. Named "...Payload"
+        for historical reasons (this entry predates TenantMembershipRemoved's
+        equivalent "...Envelope" naming); the shape below is the confirmed-
+        correct top-level envelope, not a nested payload — see
+        IMPLEMENTATION_GAP_ANALYSIS.md Discrepancy 6.
       required:
-        - event_id
-        - event_type
+        - id
+        - type
         - tenant_id
-        - occurred_at
+        - time
       properties:
-        event_id:
+        id:
           type: string
           format: uuid
           description: >-
             Unique identifier of this event occurrence. Used as the
             idempotency/dedup key against the `processed_events` table
-            (8-day retention); redelivery of an event with an already-seen
-            `event_id` is a no-op.
+            (8-day retention, consumer=tenant_lifecycle_cleanup);
+            redelivery of an event with an already-seen `id` is a no-op.
           examples: ["d290f1ee-6c54-4b01-90e6-d701748f0851"]
-        event_type:
+        type:
           type: string
           const: TenantOffboarded
           description: Discriminator identifying this event type.
@@ -283,12 +293,12 @@ components:
             this tenant id in tender_acl_entries are deleted on receipt of
             this event.
           examples: ["a0f2a3c4-1111-4a2b-9c3d-000000000000"]
-        occurred_at:
+        time:
           type: string
           format: date-time
           description: Timestamp at which the offboarding occurred, as recorded by the publishing service.
           examples: ["2026-08-14T03:15:00Z"]
-      additionalProperties: false
+      additionalProperties: true
 
     TenantMembershipRemovedEnvelope:
       type: object

@@ -12,10 +12,10 @@
 --
 -- Two additions beyond the source schema, both explicitly called for by
 -- the LLD:
---   record_version — an optimistic-lock token per LLD §7.2.1/§12.1. Not
---     currently enforced on Revoke (see IMPLEMENTATION_GAP_ANALYSIS.md) —
---     the column and trigger bump are still installed so the schema is
---     forward-compatible with adding that check later.
+--   record_version — an optimistic-lock token per LLD §7.2.1/§12.1,
+--     enforced on Revoke (repository.go's Revoke gates the UPDATE on
+--     record_version = $N; see IMPLEMENTATION_GAP_ANALYSIS.md Discrepancy 1,
+--     resolved) — the trigger bump above keeps it current on every write.
 --   reason CHECK (char_length <= 500) — the source schema left this an
 --     unbounded text column; the LLD (§7.2.1) explicitly calls for a
 --     database-layer cap, not just API-layer validation.

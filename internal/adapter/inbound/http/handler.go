@@ -105,6 +105,7 @@ func respondACLError(c *gin.Context, err error) {
 // @Success      200        {object}  ListResponse
 // @Failure      400        {object}  ErrorResponse
 // @Failure      403        {object}  ErrorResponse
+// @Failure      503        {object}  ErrorResponse
 // @Security     UserID
 // @Security     TenantID
 // @Security     TenantRoles
@@ -212,6 +213,7 @@ func (h *Handler) Grant(c *gin.Context) {
 // @Failure      400  {object}  ErrorResponse
 // @Failure      403  {object}  ErrorResponse
 // @Failure      409  {object}  ErrorResponse
+// @Failure      503  {object}  ErrorResponse
 // @Security     UserID
 // @Security     TenantID
 // @Security     TenantRoles

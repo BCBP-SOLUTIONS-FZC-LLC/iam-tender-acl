@@ -92,6 +92,12 @@ const docTemplate = `{
                         "schema": {
                             "$ref": "#/definitions/http.ErrorResponse"
                         }
+                    },
+                    "503": {
+                        "description": "Service Unavailable",
+                        "schema": {
+                            "$ref": "#/definitions/http.ErrorResponse"
+                        }
                     }
                 }
             },
@@ -268,6 +274,12 @@ const docTemplate = `{
                         "schema": {
                             "$ref": "#/definitions/http.ErrorResponse"
                         }
+                    },
+                    "503": {
+                        "description": "Service Unavailable",
+                        "schema": {
+                            "$ref": "#/definitions/http.ErrorResponse"
+                        }
                     }
                 }
             }
@@ -317,6 +329,12 @@ const docTemplate = `{
                     },
                     "400": {
                         "description": "Bad Request",
+                        "schema": {
+                            "$ref": "#/definitions/http.ErrorResponse"
+                        }
+                    },
+                    "503": {
+                        "description": "Service Unavailable",
                         "schema": {
                             "$ref": "#/definitions/http.ErrorResponse"
                         }

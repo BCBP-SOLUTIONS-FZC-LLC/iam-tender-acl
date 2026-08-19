@@ -5,6 +5,44 @@ All notable changes to this project are documented in this file. Format based on
 
 ## [Unreleased]
 
+### Fixed — `dependency_unavailable`/503 was dead code on TAC-1/3/4 (BREAKING for anyone depending on the old 500)
+
+Found while cross-checking `api/asyncapi.yaml`/`docs/swagger/` against the LLD and the running
+code: the LLD and `IMPLEMENTATION_GAP_ANALYSIS.md`'s error-code table both claimed `dependency_unavailable`
+(503) is returned when this service's own Postgres/Valkey is down — but `domain.ErrCodeDependencyUnavailable`
+was never actually constructed anywhere. A real connectivity failure on TAC-1 (list), TAC-3 (revoke),
+or TAC-4 (check access) fell through `respondACLError`'s default case to `500 internal_server_error`
+instead. Swagger's own hand-written `@Failure` annotations for those three routes correctly omitted
+`503` — which is what surfaced the mismatch when checked against the LLD's claim.
+
+- `internal/adapter/outbound/postgres/repository.go`: added `wrapConnErr`, mirroring `iam-user-profile`'s
+  identical helper — passes through an already-classified `*domain.Error`, a `*pgconn.PgError` (a real
+  SQL error, not connectivity), `pgx.ErrNoRows`, or a context cancellation/deadline unchanged; anything
+  else becomes `dependency_unavailable`. Wired into `withTenant`, so every repository method benefits
+  (List, Grant, Revoke, FindActive, CascadeDeleteForTenant, SoftDeleteForUser) without each call site
+  needing its own classification.
+- `@Failure 503 {object} ErrorResponse` added to TAC-1/TAC-3/TAC-4's swagger annotations
+  (`handler.go`/`internal_handler.go`); `make swag` regenerated with no other drift.
+- New `internal/adapter/outbound/postgres/repository_test.go` (`TestWrapConnErr_*`, 7 cases) covers
+  every branch. Full `unit`/`integration`/`rls`/`e2e` suites and `make lint` reverified green.
+- `IMPLEMENTATION_GAP_ANALYSIS.md`'s error-code table corrected — it had marked this row "✅ verified"
+  when it wasn't.
+
+### Fixed — two stale documentation artifacts caught during an external-LLD drift sweep
+
+- **`internal/adapter/outbound/postgres/migrations/0003_tender_acl_entries.up.sql`'s comment** claimed
+  `record_version` was "not currently enforced on Revoke" — stale since `IMPLEMENTATION_GAP_ANALYSIS.md`
+  Discrepancy 1 was resolved (`repository.go`'s `Revoke` has gated the `UPDATE` on `record_version` for
+  some time). Comment-only fix; the already-applied `.up.sql` DDL is unchanged.
+- **`api/asyncapi.yaml`'s `TenantOffboardedPayload` schema** used a nested `event_id`/`event_type`/
+  `occurred_at` shape that predates this repo's confirmation of `platform-events`' real `Envelope[T]`
+  wire format (`id`/`type`/`tenant_id`/`time`, all top-level) — `IMPLEMENTATION_GAP_ANALYSIS.md`
+  Discrepancy 6 already flagged this as open. Corrected the schema, its example payload, and its
+  `x-consumer-schema-dependency` block to the confirmed-correct shape, matching the
+  `TenantMembershipRemoved` entry added alongside it in Phase 3 (which already used the correct shape).
+  Consumer code (`offboarding_consumer.go`) was already reading the correct top-level fields — only the
+  spec's documentation of that shape was wrong.
+
 ### Changed — `processed_events.event_id` is now `uuid`, matching `iam-group-mapping`'s convention
 
 Compared this service's SQS-consumer idempotency ledger against `iam-group-mapping`'s (the only

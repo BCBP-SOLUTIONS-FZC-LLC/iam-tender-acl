@@ -18,6 +18,7 @@ import "github.com/gin-gonic/gin"
 // @Param        user_id    path      string  true  "User UUID"    format(uuid)
 // @Success      200        {object}  CheckAccessResponse
 // @Failure      400        {object}  ErrorResponse
+// @Failure      503        {object}  ErrorResponse
 // @Router       /internal/tenants/{id}/tenders/{tender_id}/acl/{user_id} [get]
 func (h *Handler) CheckAccess(c *gin.Context) {
 	tenantID, ok := parseUUIDParam(c, "id")

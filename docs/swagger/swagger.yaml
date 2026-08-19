@@ -118,6 +118,10 @@ paths:
           description: Forbidden
           schema:
             $ref: '#/definitions/http.ErrorResponse'
+        "503":
+          description: Service Unavailable
+          schema:
+            $ref: '#/definitions/http.ErrorResponse'
       security:
       - UserID: []
       - TenantID: []
@@ -234,6 +238,10 @@ paths:
           description: Conflict
           schema:
             $ref: '#/definitions/http.ErrorResponse'
+        "503":
+          description: Service Unavailable
+          schema:
+            $ref: '#/definitions/http.ErrorResponse'
       security:
       - UserID: []
       - TenantID: []
@@ -273,6 +281,10 @@ paths:
             $ref: '#/definitions/http.CheckAccessResponse'
         "400":
           description: Bad Request
+          schema:
+            $ref: '#/definitions/http.ErrorResponse'
+        "503":
+          description: Service Unavailable
           schema:
             $ref: '#/definitions/http.ErrorResponse'
       summary: TAC-4 — Check tender access
