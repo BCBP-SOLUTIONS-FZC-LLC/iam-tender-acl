@@ -126,14 +126,19 @@ func NewRouter(h *Handler, postgres PostgresHealth, cache Pinger, logger *slog.L
 	return &Router{engine: engine}
 }
 
-// registerDocsRoutes wires the Swagger UI rendering the OpenAPI spec
-// generated from the // @… annotations by `make swag`
-// (docs/swagger/docs.go's init() registers it; see
-// cmd/tender-acl/swagger_info.go for the top-level spec metadata). Outside
-// production it's always mounted; in production it's opt-in via
-// DocsConfig.Enabled and, if AuthToken is set, gated behind a bearer token
-// so the API surface isn't exposed to the open internet by default. Mirrors
-// iam-org-membership's identical registerDocsRoutes.
+// registerDocsRoutes wires the Swagger UI (REST) and AsyncAPI viewer
+// (events) doc surfaces. Swagger renders the OpenAPI spec generated from
+// the // @… annotations by `make swag` (docs/swagger/docs.go's init()
+// registers it; see cmd/tender-acl/swagger_info.go for the top-level spec
+// metadata). The AsyncAPI viewer (asyncapi.go) renders api/asyncapi.yaml —
+// embedded at compile time (api/embed.go), so it needs no file present at
+// runtime — as a browsable HTML catalog at GET /asyncapi, plus the raw
+// spec verbatim at GET /asyncapi.yaml, ported from iam-user-profile's
+// identical viewer. Outside production both are always mounted; in
+// production they're opt-in via DocsConfig.Enabled and, if AuthToken is
+// set, gated behind the same bearer token so the API/event surface isn't
+// exposed to the open internet by default. Mirrors iam-org-membership's
+// identical registerDocsRoutes for the Swagger half.
 func registerDocsRoutes(engine *gin.Engine, docs DocsConfig) {
 	if !docs.active() {
 		return
@@ -143,6 +148,14 @@ func registerDocsRoutes(engine *gin.Engine, docs DocsConfig) {
 		group.Use(docsAuthMiddleware(docs.AuthToken))
 	}
 	group.GET("/*any", ginSwagger.WrapHandler(swaggerFiles.Handler))
+
+	asyncGroup := engine.Group("")
+	if docs.Environment == "production" && docs.AuthToken != "" {
+		asyncGroup.Use(docsAuthMiddleware(docs.AuthToken))
+	}
+	asyncGroup.Use(envMiddleware(docs.Environment))
+	asyncGroup.GET("/asyncapi", AsyncAPIHandler)
+	asyncGroup.GET("/asyncapi.yaml", AsyncAPIYAMLHandler)
 }
 
 // docsAuthMiddleware requires an exact `Authorization: Bearer <token>` match

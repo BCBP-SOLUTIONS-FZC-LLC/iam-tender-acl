@@ -67,6 +67,10 @@ info:
 
 defaultContentType: application/json
 
+tags:
+  - $ref: "#/components/tags/consumed"
+  - $ref: "#/components/tags/published"
+
 servers:
   tenantLifecycleQueue:
     host: sqs.amazonaws.com
@@ -178,11 +182,33 @@ operations:
       - $ref: "#/channels/member-removal-tenderacl-q/messages/TenantMembershipRemoved"
 
 components:
+  tags:
+    consumed:
+      name: consumed
+      description: >-
+        This service is the consumer, not the producer, for every message
+        carrying this tag — both TenantOffboarded and TenantMembershipRemoved.
+        Canonical schema ownership sits with the producing service
+        (iam-org-membership) — these definitions are this service's
+        consumer-side documentation, kept in sync with upstream, not the
+        source of truth for it.
+    published:
+      name: published
+      description: >-
+        This service publishes zero events (TAC-EVT-1, TAC-D5) — no message
+        in this document carries this tag today. Declared for symmetry with
+        every sibling service's asyncapi.yaml, and so the GET /asyncapi
+        viewer's Published/Consumed split has somewhere to render a message
+        if that ever changes (e.g. an ACL grant/revoke event, which does not
+        exist as of this revision).
+
   messages:
     TenantOffboarded:
       name: TenantOffboarded
       title: Tenant Offboarded
       summary: A tenant has been offboarded and all of its data must be purged.
+      tags:
+        - $ref: "#/components/tags/consumed"
       contentType: application/json
       payload:
         $ref: "#/components/schemas/TenantOffboardedPayload"
@@ -222,6 +248,8 @@ components:
       name: TenantMembershipRemoved
       title: Tenant Membership Removed
       summary: A user's tenant membership has been removed; their tender ACL entries in this tenant must be soft-deleted.
+      tags:
+        - $ref: "#/components/tags/consumed"
       contentType: application/json
       payload:
         $ref: "#/components/schemas/TenantMembershipRemovedEnvelope"

@@ -48,7 +48,8 @@ write volume.
 
 Full request/response schemas: Swagger UI at `/swagger` (generated from handler annotations via
 `make swag`, mirrors `iam-org-membership`'s identical setup). Event contract (inbound only):
-[`api/asyncapi.yaml`](api/asyncapi.yaml).
+[`api/asyncapi.yaml`](api/asyncapi.yaml), also browsable as a rendered HTML catalog at `/asyncapi`
+(ported from `iam-user-profile`'s identical viewer) — see Local development below.
 
 ## Local development
 
@@ -58,9 +59,14 @@ make docker-up       # postgres + valkey + localstack (SQS-compatible), see dock
 make run             # runs the binary against docker-up's dependencies
 ```
 
-Docs, once running: `http://localhost:8086/swagger/index.html` (port from `HTTP_PORT`, see
-`.env.example`). Regenerate after changing a handler's `// @…` annotations with `make swag`;
-`make swag-check` is the CI drift gate.
+Docs, once running (port from `HTTP_PORT`, see `.env.example`):
+
+| Tool | URL | Notes |
+|---|---|---|
+| Swagger UI | `http://localhost:8086/swagger/index.html` | REST contract (TAC-1/2/3/4). Regenerate after changing a handler's `// @…` annotations with `make swag`; `make swag-check` is the CI drift gate. |
+| AsyncAPI viewer | `http://localhost:8086/asyncapi` | Event contract browser for `api/asyncapi.yaml` — server-rendered HTML, no CDN dependencies. This service publishes zero events (TAC-EVT-1), so both `TenantOffboarded` and `TenantMembershipRemoved` render under "Consumed Messages" with a `RECEIVE` badge; there is no "Published Messages" section. `GET /asyncapi.yaml` serves the spec itself, embedded into the binary at compile time (`api/embed.go`) rather than read from disk, so it works the same way in the built container image as it does locally. |
+
+Both are dev-only by default; see `DOCS_ENABLED`/`DOCS_AUTH_TOKEN` below to opt either into production.
 
 Environment variables — see `.env.example` for the full list; the three with no safe default
 (`DATABASE_URL`, `SQS_QUEUE_URL`, `MEMBER_REMOVAL_SQS_QUEUE_URL`) must be set or the process fails
@@ -73,10 +79,12 @@ fast at startup. Notable ones:
 | `CORE_INTERNAL_BASE_URL` | `iam-org-membership`'s internal base URL, consulted only at TAC-2 grant time | `http://org-membership.iam.svc.cluster.local` |
 | `MEMBERSHIP_CHECK_TIMEOUT_MS` | Client-side timeout for the membership-existence call (LLD §15) | `300` |
 | `VALKEY_ADDR` | TAC-4's 30s cache | `localhost:6379` |
-| `SQS_QUEUE_URL` | `tenant-lifecycle-tenderacl-q` (tenant-offboarding cascade) | *(required)* |
+| `SQS_QUEUE_URL` | `tenant-lifecycle-tenderacl-q` (tenant-offboarding cascade). Loaded via `platform-events/pkg/config`'s `LoadSQS`, not this service's own `config.go` — see `SQS_CONCURRENCY` below | *(required)* |
+| `SQS_CONCURRENCY` | `tenant-lifecycle-tenderacl-q`'s consumer concurrency — `platform-events/pkg/config`'s own env var, not `CONSUMER_CONCURRENCY` below (that package has no concept of this service's second queue). `SQS_MAX_MESSAGES`/`SQS_WAIT_SECONDS`/`SQS_VISIBILITY_TIMEOUT`/`SQS_MAX_RECEIVE_COUNT` are also available for this queue via the same helper; none are currently set, so library defaults (10/20s/30s/unset) apply | `1` (library default — set explicitly to `4` in `.env`/`.env.example`/`values.yaml` to preserve this queue's prior effective concurrency) |
 | `MEMBER_REMOVAL_SQS_QUEUE_URL` | `member-removal-tenderacl-q` (per-user-removal cascade, ADR-0007 Wave 3 Phase 3) | *(required)* |
-| `DOCS_ENABLED` | Opt-in to serving `/swagger` in production | `false` |
-| `DOCS_AUTH_TOKEN` | If set, requires `Authorization: Bearer <token>` on `/swagger` in production | — |
+| `CONSUMER_CONCURRENCY` | `member-removal-tenderacl-q`'s consumer concurrency only — this service's own hand-rolled config, not `platform-events/pkg/config` (see `SQS_CONCURRENCY` above) | `4` |
+| `DOCS_ENABLED` | Opt-in to serving `/swagger` and `/asyncapi`/`/asyncapi.yaml` in production | `false` |
+| `DOCS_AUTH_TOKEN` | If set, requires `Authorization: Bearer <token>` on `/swagger` and `/asyncapi`/`/asyncapi.yaml` in production | — |
 
 ## Testing
 

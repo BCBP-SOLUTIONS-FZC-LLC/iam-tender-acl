@@ -5,6 +5,42 @@ All notable changes to this project are documented in this file. Format based on
 
 ## [Unreleased]
 
+### Added — `GET /asyncapi` / `GET /asyncapi.yaml`, an HTML viewer for `api/asyncapi.yaml`
+
+Ported `iam-user-profile`'s AsyncAPI viewer (`internal/adapter/inbound/http/asyncapi.go`) into this
+service — a server-rendered, dark/light-themed HTML catalog page for the event contract, plus a
+route serving the raw spec. The renderer itself needed no logic changes: it walks
+`components.messages`/`components.schemas` directly (a prior version in the source repo used a
+hardcoded name list and had a related bug, already fixed there), so it renders this service's own
+two-message spec correctly with no service-specific hardcoding.
+
+- `api/asyncapi.yaml` gains `components.tags.published`/`consumed` and a `tags:` entry on both
+  `TenantOffboarded` and `TenantMembershipRemoved` (both `consumed` — this service publishes zero
+  events, TAC-EVT-1), mirroring `iam-user-profile`'s tagging convention so the viewer's
+  Published/Consumed split has something to key off.
+- New `api/embed.go` (`//go:embed asyncapi.yaml`) embeds the spec into the binary at compile time,
+  rather than reading it from disk at request time the way `iam-user-profile`'s viewer does —
+  this service's `Dockerfile` final stage, like every sibling service's, copies only the compiled
+  binary into the distroless image, not the source tree, so a disk-read approach would 404/500 in
+  the built container even though it works fine locally (where the process's cwd is the repo root).
+  `GET /asyncapi.yaml` serves the embedded bytes directly.
+- One adaptation beyond a straight port: `renderPage` omits the "Published Messages"
+  section/sidebar group entirely when there are no published messages, rather than rendering it
+  empty — this service has none, so it never appears; `iam-user-profile`'s own viewer always shows
+  both headings since it always has at least one published message.
+- Both routes are wired into `registerDocsRoutes` (`router.go`) under the exact same
+  `DocsConfig`/`docsAuthMiddleware` gating as the existing `/swagger` route — dev-only by default,
+  opt-in and bearer-token-gated in production via `DOCS_ENABLED`/`DOCS_AUTH_TOKEN`.
+- New `internal/adapter/inbound/http/asyncapi_test.go` — parser/render unit tests plus the
+  regression-shaped ones specific to this port (published section omitted, both real messages
+  render as `consumed`/`RECEIVE`), and router-level tests for the doc-gating behavior.
+- `README.md`/`ARCHITECTURE.md` updated to document the new routes.
+
+Verified: `go build`, `go vet` (default + all tags), full `go test ./...`, `golangci-lint` (plain +
+all-tags), and a manual render of the real embedded spec (confirmed both messages render under
+"Consumed Messages" with a `RECEIVE` badge and no "Published Messages" section appears) — all
+clean.
+
 ### Fixed — graceful shutdown now uses `DrainAndClose`, matching what `tender-acl-service-lld.md` §16.4 already documented
 
 Found during an LLD-vs-code alignment sweep: §16.4 has, since this document's v2.0, stated that
