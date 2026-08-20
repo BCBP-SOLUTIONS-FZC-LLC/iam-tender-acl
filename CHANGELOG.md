@@ -5,6 +5,173 @@ All notable changes to this project are documented in this file. Format based on
 
 ## [Unreleased]
 
+### Fixed — graceful shutdown now uses `DrainAndClose`, matching what `tender-acl-service-lld.md` §16.4 already documented
+
+Found during an LLD-vs-code alignment sweep: §16.4 has, since this document's v2.0, stated that
+this process's Postgres pool shutdown goes through `pgcommon.Pool.DrainAndClose(ctx)` — but
+`cmd/tender-acl/main.go` actually called the bare `Close()` for both Postgres pools. Harmless in
+practice (`httpServer.Shutdown` and both SQS consumers' `Stop()` already wait for in-flight work
+to finish before either deferred close ran, so there was nothing left for `DrainAndClose`'s wait
+to matter for), but not what was documented, and a real regression risk if that ordering ever
+changed without anyone noticing `Close` doesn't wait for anything. Both the RLS-bound pool and the
+separate pool backing `processed_events` (a second pool since the platform-pgcommon audit earlier
+in this changelog) now call `DrainAndClose` with a bounded 30s context on shutdown, logging (not
+failing) if the drain times out. `tender-acl-service-lld.md` updated in the same pass: §16.4 now
+names both pools instead of one, §6.3.3 corrected for the SQS-config-loading split from the
+platform-events changes above, §14.1's TAC-4 cache-miss SLO moved from 20ms to 25ms (the nearest
+bucket boundary platform-gincommon's fixed histogram actually has, a direct consequence of the
+metrics-passthrough change above), and §14.2 corrected to describe the real metric names this
+service emits post-passthrough (the two `tender_acl_requests_total`/`_duration_seconds` bullets it
+previously listed no longer exist) plus the newly-activated platform-events consumer metrics.
+
+### Changed — platform-events' own consumer metrics activated, and the tenant-offboarding queue's config now goes through platform-events/pkg/config
+
+Found while auditing this service's events/outbox/configuration against platform-events:
+
+- **`events.InitWithRegisterer` is now called once at startup** (`cmd/tender-acl/main.go`).
+  `internal/adapter/outbound/sqs`'s consumer implementation already calls
+  `metrics.RecordConsume`/`RecordSQSReceiveError`/`RecordSQSVisibilityError`/`RecordSQSDeleteError`
+  unconditionally at every relevant point in its receive/decode/handle/delete lifecycle for both
+  queues — they were nil-guarded no-ops until this call, since nothing in this process ever
+  registered them. This activates `events_consumed_total`/`events_consume_duration_seconds` plus,
+  more importantly, `sqs_receive_errors_total`/`sqs_delete_errors_total`/
+  `sqs_visibility_extension_errors_total` — the library's own docs flag the latter two as *causing
+  duplicate message delivery* when non-zero, which is exactly the failure mode this service's
+  `processed_events` idempotency ledger exists to survive; there was previously zero visibility
+  into what triggers it. No other code change needed. Uses `InitWithRegisterer` with
+  `gincommon.MetricsRegisterer()` (not `Init`, which always uses `prometheus.DefaultRegisterer`),
+  matching this service's existing explicit-registerer convention.
+- **The tenant-offboarding queue's (`tenant-lifecycle-tenderacl-q`, `SQS_QUEUE_URL`) config now
+  goes through `platform-events/pkg/config`'s `LoadSQS`/`SQSConfigFromEnv`/`SQSConsumerOptions`**
+  instead of a hand-rolled equivalent that duplicated the same env-var parsing with a real
+  capability gap: `SQS_MAX_MESSAGES`/`SQS_WAIT_SECONDS`/`SQS_VISIBILITY_TIMEOUT` were not
+  configurable at all before (no code path read them), and there was no misconfiguration-warning
+  logging for this queue's env vars the way Postgres config warnings already get logged
+  (`pgcommon.ConfigFromEnv`'s pattern) — `LoadSQS().Validate()`/`.Warnings` close both gaps.
+  `SQSConsumerOptions` only appends `WithMaxReceiveCount` when `SQS_MAX_RECEIVE_COUNT` is set
+  (it isn't, anywhere in this service's env files), so this cannot reintroduce the
+  `WithMaxReceiveCount`-without-a-paired-`WithDeadLetterHandler` no-op a prior version of this
+  code once had.
+  - **`member-removal-tenderacl-q` (`MEMBER_REMOVAL_SQS_QUEUE_URL`) deliberately stays hand-rolled** —
+    `LoadSQS` reads one fixed, unparameterized set of env var names with no concept of a second
+    queue, so it can only serve one of this service's two independent subscriptions. Its
+    `events.SQSConfig` now sets `Logger` (previously nil, matching the same "structured logger
+    instead of nowhere" fix already applied to pgcommon/gincommon elsewhere), for consistency,
+    but otherwise it's unchanged.
+  - **BREAKING env var for the first queue only, service not yet deployed**: concurrency for
+    `tenant-lifecycle-tenderacl-q` moves from `CONSUMER_CONCURRENCY` (default 4, this service's
+    own convention) to `SQS_CONCURRENCY` (`platform-events/pkg/config`'s own env var, default 1).
+    `.env`, `.env.example`, `docker-compose.yml`, and `deploy/helm/tender-acl/values.yaml` all set
+    `SQS_CONCURRENCY: "4"` explicitly to preserve the prior effective concurrency rather than
+    silently dropping to the library's default of 1. `CONSUMER_CONCURRENCY` continues to apply
+    only to `member-removal-tenderacl-q`.
+  - `cmd/tender-acl/config.go`: `SQSQueueURL` field and its required-env check removed —
+    `SQS_QUEUE_URL` is now validated via `SQSConfigEnv.Validate()` in `main.go`'s `run()` instead.
+  - `cmd/tender-acl/observability.go`: new `slogMapLogger` adapter (the
+    map[string]interface{}-shaped `Logger` interface both platform-gincommon's and
+    platform-events' configs expect — same structural-typing precedent as `http.slogPlatformLogger`,
+    duplicated here since it lives in a different package), wired into both `SQSConfig.Logger`s and
+    `eventsconfig.LogWarningsTo`.
+- No test changes needed — no test constructs `cmd/tender-acl`'s `config`/`run()` directly (every
+  test file replicates its own wiring for testability, per the existing pattern). Full
+  `unit`/`integration`/`rls`/`e2e` suites, `go vet` (default plus all three build tags),
+  `go tool golangci-lint run` (plain and all-tags), and `helm lint` reverified green.
+
+### Changed — three platform-pgcommon connection/config/operation gaps closed after an audit
+
+Found while auditing this service's Postgres connection, config, and operations against
+platform-pgcommon's real API — none were bugs, but each left a documented library capability
+unused where it directly applied:
+
+- **`processed_events`'s idempotency ledger now goes through a second `pgcommon.Pool`, not a
+  bare `*pgxpool.Pool`.** The separate-pool requirement itself is unchanged and still necessary
+  (`pgcommon.Pool` has no raw-pool accessor, and this table carries no RLS — LLD §7.3), but the
+  previous plain `pgxpool.New(baseCtx, cfg.DatabaseURL)` got none of pgcommon's slow-query
+  logging or OTel query tracing, leaving this consumer's idempotency writes — on the critical
+  path for exactly-once cascade semantics — entirely invisible to both. `internal/adapter/inbound/
+  consumer/processed_events.go`'s `ProcessedEvents` now holds a `*pgcommon.Pool` (no
+  `GUCProvider`, so no GUC injection is ever attempted) and runs its three queries through
+  `WithConn` instead of calling `Query`/`Exec` directly on a `*pgxpool.Pool`.
+  `cmd/tender-acl/main.go`'s `rawPool` is built the same way, wired with the same
+  `Logger`/`Tracer`/`PGBouncerMode` as the main pool. `test/integration/main_test.go` adds a
+  second, admin-DSN `pgcommon.Pool` for this specifically — `adminPool` (the bare `*pgxpool.Pool`
+  used by every other raw assertion query in that package) is untouched.
+- **`/readyz`'s Postgres check now uses `pgcommon.Pool.Health(ctx)` instead of a bare `Ping`.**
+  `Health`'s own doc comment recommends exactly this exposure — a liveness ping plus pool
+  utilization stats — rather than a bare up/down bool that discards exactly the data useful for
+  diagnosing pool exhaustion mid-incident. `internal/adapter/inbound/http/health.go` adds a
+  `PostgresHealth` interface (`Health(ctx) pgcommon.HealthStatus`), used only for the `postgres`
+  dependency; `cache` keeps the plain `Pinger`. The response body gains a `checks.postgres_pool`
+  object (`total_conns`/`idle_conns`/`acquired_conns`/`max_conns`/`utilization`) alongside the
+  existing `checks.postgres` ok/error string — additive, not a breaking response-shape change.
+  `NewRouter`'s `postgres` parameter is now `PostgresHealth`; `*pgcommon.Pool` satisfies it
+  structurally at every call site with no changes needed there. `health_test.go`'s postgres fake
+  is now `fakePostgresHealth` (a `cache`-only `fakePinger` remains for the Valkey check).
+- **`withTenant` now calls `pgcommon.WithValidatedGUCSet` instead of the plain `WithGUCSet`** —
+  the library's own docs call this the preferred helper, catching an inconsistent `GUCSet` at
+  injection time rather than deep inside `RunInTx`. No behavioral change today (`withTenant` only
+  ever sets `TenantID`, never `UserID`, and `GUCSet.Validate()` explicitly allows a tenant-only
+  GUC), but the validation error path is deliberately *not* routed through `wrapConnErr` — a
+  validation failure is a programming error, not a connectivity failure, and `wrapConnErr`'s
+  default branch would otherwise misclassify it as `dependency_unavailable`.
+- No test assumed the old `*pgxpool.Pool`-typed `NewProcessedEvents` parameter or the old
+  `Pinger`-typed `postgres` field beyond the call sites touched above — the consumer package's own
+  unit tests use a fake `IdempotencyStore` (interface-based), never the concrete `ProcessedEvents`.
+  Full `unit`/`integration`/`rls`/`e2e` suites, `go vet` (default plus all three build tags), and
+  `go tool golangci-lint run` (plain and with all test build tags) reverified green.
+
+### Changed — generic HTTP metrics now pass through platform-gincommon instead of a duplicate `tender_acl_*` copy (BREAKING metric names — service not yet deployed)
+
+Found while auditing this service's logs/traces/metrics against platform-gincommon: `router.go`'s
+`metricsMiddleware` recorded `tender_acl_requests_total{method,path,status}` /
+`tender_acl_request_duration_seconds{method,path}` for every request, but
+`gincommon.ObservabilityMiddlewares` was *already* recording the same thing as
+`http_requests_total{method,route,status_class,error_class}` /
+`http_request_duration_seconds{...}` (its own `MetricsMiddleware`, part of the middleware chain
+this service installs) — two parallel counters/histograms for the same event, under different
+names. Also found and fixed a smaller duplicate in the same area: `writeError`
+(`handler.go`) was re-deriving `trace_id` from the raw OTel span instead of calling
+`gincommon.TraceIDFromContext(c)`, which already exposes the identical value `TracingMiddleware`
+caches on the gin context.
+
+Since this service has no production deployment yet, there was no live dashboard/alert depending
+on the old `tender_acl_requests_total`/`tender_acl_request_duration_seconds` names, so the
+generic HTTP metrics were switched to a full passthrough rather than kept as a second,
+same-shaped series:
+
+- `internal/adapter/inbound/http/router.go`: removed `metricsMiddleware` and the `m
+  *metrics.Metrics` parameter it needed on `NewRouter` — generic request metrics are entirely
+  gincommon's now.
+- `internal/adapter/inbound/http/handler.go`: `writeError` now gets both `trace_id` and
+  `request_id` from `gincommon.TraceIDFromContext`/`RequestIDFromContext`; dropped the
+  now-unused `go.opentelemetry.io/otel/trace` import.
+- `internal/adapter/outbound/metrics/metrics.go`: removed `requestsTotal`/`requestDuration`
+  (and the `requestDurationBuckets` var, `RecordRequest`/`RecordRequestDuration` methods) — this
+  package now owns only metrics gincommon has no equivalent for (writes, grant checks, cache
+  hits/misses, both cascades).
+- `deploy/monitoring/slo-rules.yml`: SLO-1's latency SLI now queries gincommon's
+  `http_request_duration_seconds_bucket{route=...}`. gincommon's fixed bucket set has no `0.02`
+  boundary (it has `0.015`/`0.025`), so the SLO target moved from the LLD's 20ms to 25ms — the
+  nearest boundary actually available — rather than the recording rule silently mismatching.
+- `deploy/monitoring/app-alerts.yml` and `deploy/helm/tender-acl/templates/prometheusrule.yaml`:
+  `TenderAclTAC4HighErrorRate`/`TenderAclHighErrorRate` now query
+  `http_requests_total{route=...,error_class="server_error"}` instead of
+  `tender_acl_requests_total{path=...,status=~"5.."}`.
+- `deploy/monitoring/prometheus-adapter-rule.yaml` and
+  `deploy/helm/tender-acl/templates/hpa.yaml`: the HPA's RPS custom metric is now derived from
+  `http_requests_total` and renamed `http_requests_per_second` (from
+  `tender_acl_requests_per_second`) — still scoped to this service's own pods via the HPA's
+  target selector despite the now-generic name.
+- `.github/workflows/release.yml`: the post-deploy canary error-rate gate queries
+  `http_requests_total{...,error_class="server_error"}` instead of
+  `tender_acl_requests_total{...,status=~"5.."}`.
+- `ARCHITECTURE.md` / `docs/architecture/mermaid/request-flow.mmd`: updated the Observability
+  section and sequence-diagram notes to match.
+- No test changes beyond `test/e2e/main_test.go`'s `NewRouter` call site (dropped the removed
+  `svcMetrics` argument) — no unit test asserted on the removed fields/metric names. Full
+  `unit`/`integration`/`rls`/`e2e` suites and `go vet` (including the `e2e`/`integration`/`rls`
+  build tags) reverified green.
+
 ### Fixed — `dependency_unavailable`/503 was dead code on TAC-1/3/4 (BREAKING for anyone depending on the old 500)
 
 Found while cross-checking `api/asyncapi.yaml`/`docs/swagger/` against the LLD and the running

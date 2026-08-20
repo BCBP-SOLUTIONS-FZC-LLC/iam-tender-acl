@@ -11,12 +11,21 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	pgcommon "github.com/BCBP-SOLUTIONS-FZC-LLC/platform-pgcommon/pkg/pgcommon"
 )
 
 // fakePinger is a Pinger whose Ping result is set per-test.
 type fakePinger struct{ err error }
 
 func (f fakePinger) Ping(_ context.Context) error { return f.err }
+
+// fakePostgresHealth is a PostgresHealth whose Health result is set per-test.
+type fakePostgresHealth struct{ healthy bool }
+
+func (f fakePostgresHealth) Health(_ context.Context) pgcommon.HealthStatus {
+	return pgcommon.HealthStatus{Healthy: f.healthy}
+}
 
 func readyzCtx() (*gin.Context, *httptest.ResponseRecorder) {
 	w := httptest.NewRecorder()
@@ -26,7 +35,7 @@ func readyzCtx() (*gin.Context, *httptest.ResponseRecorder) {
 }
 
 func TestReadyz_BothHealthy_Returns200(t *testing.T) {
-	h := &healthHandlers{postgres: fakePinger{}, cache: fakePinger{}}
+	h := &healthHandlers{postgres: fakePostgresHealth{healthy: true}, cache: fakePinger{}}
 	c, w := readyzCtx()
 
 	h.readyz(c)
@@ -38,10 +47,11 @@ func TestReadyz_BothHealthy_Returns200(t *testing.T) {
 	checks, _ := body["checks"].(map[string]any)
 	assert.Equal(t, "ok", checks["postgres"])
 	assert.Equal(t, "ok", checks["valkey"])
+	assert.Contains(t, checks, "postgres_pool")
 }
 
 func TestReadyz_PostgresDown_Returns503(t *testing.T) {
-	h := &healthHandlers{postgres: fakePinger{err: errors.New("connection refused")}, cache: fakePinger{}}
+	h := &healthHandlers{postgres: fakePostgresHealth{healthy: false}, cache: fakePinger{}}
 	c, w := readyzCtx()
 
 	h.readyz(c)
@@ -60,7 +70,7 @@ func TestReadyz_PostgresDown_Returns503(t *testing.T) {
 // readiness — matching ARCHITECTURE.md's Cache Strategy section. A
 // regression here would pull healthy pods out of rotation on a Valkey blip.
 func TestReadyz_ValkeyDown_StaysReady(t *testing.T) {
-	h := &healthHandlers{postgres: fakePinger{}, cache: fakePinger{err: errors.New("connection refused")}}
+	h := &healthHandlers{postgres: fakePostgresHealth{healthy: true}, cache: fakePinger{err: errors.New("connection refused")}}
 	c, w := readyzCtx()
 
 	h.readyz(c)
@@ -76,7 +86,7 @@ func TestReadyz_ValkeyDown_StaysReady(t *testing.T) {
 
 func TestReadyz_BothDown_Returns503(t *testing.T) {
 	h := &healthHandlers{
-		postgres: fakePinger{err: errors.New("connection refused")},
+		postgres: fakePostgresHealth{healthy: false},
 		cache:    fakePinger{err: errors.New("connection refused")},
 	}
 	c, w := readyzCtx()

@@ -5,7 +5,6 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
-	"go.opentelemetry.io/otel/trace"
 
 	"github.com/BCBP-SOLUTIONS-FZC-LLC/iam-tender-acl/internal/core/domain"
 	"github.com/BCBP-SOLUTIONS-FZC-LLC/iam-tender-acl/internal/core/service"
@@ -53,15 +52,19 @@ func requireSameTenant(c *gin.Context, tenantID uuid.UUID) bool {
 }
 
 // writeError writes this service's standard error envelope
-// (ErrorResponse, dto.go), populating trace_id/request_id from the
-// current span/gincommon request-id the same way gincommon's own
-// middleware-emitted error bodies do.
+// (ErrorResponse, dto.go), populating trace_id/request_id from
+// gincommon's own TracingMiddleware/RequestIDMiddleware-populated gin
+// context — the same values gincommon's own middleware-emitted error
+// bodies use — rather than re-deriving trace_id from the raw OTel span
+// (a prior version did, duplicating what gincommon.TraceIDFromContext
+// already exposes).
 func writeError(c *gin.Context, status int, code string) {
-	resp := ErrorResponse{Error: code, Status: status}
-	if span := trace.SpanFromContext(c.Request.Context()); span.SpanContext().IsValid() {
-		resp.TraceID = span.SpanContext().TraceID().String()
+	resp := ErrorResponse{
+		Error:     code,
+		Status:    status,
+		TraceID:   gincommon.TraceIDFromContext(c),
+		RequestID: gincommon.RequestIDFromContext(c),
 	}
-	resp.RequestID = gincommon.RequestIDFromContext(c)
 	c.AbortWithStatusJSON(status, resp)
 }
 

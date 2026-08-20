@@ -6,10 +6,12 @@
 #
 #  SLO-1  TAC-4 authorization-check latency
 #         Target: 99% of GET /internal/.../acl/:user_id requests complete
-#         within 20ms (the LLD's cache-miss target — the safe combined
-#         bound across both cache hit (5ms) and cache miss (20ms) cases).
-#         TAC-4 sits on a live authorization decision path (Tender
-#         Service, AuthZ Enrichment).
+#         within 25ms (the LLD's 20ms cache-miss target, rounded up to the
+#         nearest bucket boundary platform-gincommon's own
+#         http_request_duration_seconds histogram exposes — see the SLI
+#         recording rule comment below for why this service no longer
+#         maintains its own duration histogram). TAC-4 sits on a live
+#         authorization decision path (Tender Service, AuthZ Enrichment).
 #
 #  SLO-2  Write-path error rate
 #         Target: 99.9% of TAC-2/TAC-3 writes (tender_acl_writes_total)
@@ -45,37 +47,49 @@ groups:
     rules:
       # TAC-4 latency histogram → error budget window.
       #
-      # le="0.02", not "0.020" — Prometheus's `le` bucket label is the exact
-      # string client_golang/OTel expose for the boundary's float64 value
-      # (Go's minimal-digits formatting), and PromQL label matching is a
-      # verbatim string match, not numeric — "0.020" never matches a stored
-      # "0.02" label, silently returning no data rather than an error. A
-      # metrics-instrumentation audit caught this discrepancy live against
-      # the actual /metrics output; fixed here.
+      # Sourced from platform-gincommon's own http_request_duration_seconds
+      # (ObservabilityMiddlewares' MetricsMiddleware) rather than a
+      # tender_acl_request_duration_seconds this service used to maintain
+      # itself — this service is not yet deployed, so switching to a fully
+      # gincommon-passthrough metric carried no live-dashboard migration
+      # cost. gincommon's fixed bucket set has no 0.02 boundary (it has
+      # 0.015/0.025); le="0.025" is the nearest one available, hence the
+      # 25ms (not 20ms) SLO target above. `route`, not `path` — gincommon's
+      # label name for the matched route template. `error_class` isn't
+      # filtered here (this SLI is latency, not error rate); `job` scopes
+      # the query to this service's own scrape target only, since
+      # http_requests_total/http_request_duration_seconds are the same
+      # metric names every gincommon-based service in the cluster emits.
+      #
+      # le is a verbatim string match against whatever client_golang's
+      # minimal-digits float64 formatting produces for the boundary — not
+      # numeric — so it must match the exact bucket value in
+      # platform-gincommon/pkg/gincommon's RequestDurationBuckets, not
+      # whatever string this comment happens to write.
       - record: tender_acl:tac4_latency_sli:ratio_rate_5m
         expr: |
-          sum(rate(tender_acl_request_duration_seconds_bucket{
+          sum(rate(http_request_duration_seconds_bucket{
             job="tender-acl",
-            path=~".*/internal/.*acl.*",
-            le="0.02"
+            route=~".*/internal/.*acl.*",
+            le="0.025"
           }[5m]))
           /
-          clamp_min(sum(rate(tender_acl_request_duration_seconds_count{
+          clamp_min(sum(rate(http_request_duration_seconds_count{
             job="tender-acl",
-            path=~".*/internal/.*acl.*"
+            route=~".*/internal/.*acl.*"
           }[5m])), 0.001)
 
       - record: tender_acl:tac4_latency_sli:ratio_rate_1h
         expr: |
-          sum(rate(tender_acl_request_duration_seconds_bucket{
+          sum(rate(http_request_duration_seconds_bucket{
             job="tender-acl",
-            path=~".*/internal/.*acl.*",
-            le="0.02"
+            route=~".*/internal/.*acl.*",
+            le="0.025"
           }[1h]))
           /
-          clamp_min(sum(rate(tender_acl_request_duration_seconds_count{
+          clamp_min(sum(rate(http_request_duration_seconds_count{
             job="tender-acl",
-            path=~".*/internal/.*acl.*"
+            route=~".*/internal/.*acl.*"
           }[1h])), 0.001)
 
       # Write-path error rate across TAC-2 (grant) / TAC-3 (revoke).
@@ -117,7 +131,7 @@ groups:
         annotations:
           summary: "SLO-1 fast-burn: TAC-4 authorization-check latency degraded"
           description: |
-            TAC-4 is missing its 20ms target for {{ $value | humanizePercentage }}
+            TAC-4 is missing its 25ms target for {{ $value | humanizePercentage }}
             of requests over the last 5m + 1h windows. TAC-4 is on a live
             authorization decision path — check tender_acl_check_calls_total
             (cache-vs-miss split isn't independently metered; a Valkey

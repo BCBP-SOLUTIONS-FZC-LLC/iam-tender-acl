@@ -108,7 +108,7 @@ func runTestMain(m *testing.M) int {
 	repo := aclpostgres.NewTenderACLRepository(pgPool)
 	svc := service.NewACLService(repo, fakeChecks, aclCache, svcMetrics, logger, tracer)
 	h := httpadapter.NewHandler(svc)
-	router := httpadapter.NewRouter(h, pgPool, aclCache, svcMetrics, logger, nil, httpadapter.DocsConfig{Environment: "development"})
+	router := httpadapter.NewRouter(h, pgPool, aclCache, logger, nil, httpadapter.DocsConfig{Environment: "development"})
 	handler = router.Handler()
 
 	return m.Run()

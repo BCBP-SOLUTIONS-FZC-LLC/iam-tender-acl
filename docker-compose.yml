@@ -104,9 +104,17 @@ services:
       # no code change is needed to redirect SQS calls here instead of real AWS.
       SQS_QUEUE_URL: http://localstack:4566/000000000000/tenant-lifecycle-tenderacl-q
       SQS_DLQ_URL: http://localstack:4566/000000000000/tenant-lifecycle-tenderacl-q-dlq
+      # SQS_QUEUE_URL and this one are loaded by platform-events/pkg/config's
+      # LoadSQS, not this service's own config.go — 4, not LoadSQS's own
+      # default of 1, to match this queue's prior CONSUMER_CONCURRENCY-driven
+      # concurrency.
+      SQS_CONCURRENCY: "4"
       # ADR-0007 Wave 3 Phase 3 (O_AND_M_DELTA.md §5 Option B) — the
       # per-user-removal ACL cascade, a second/independent subscription
-      # from the tenant-offboarding one above.
+      # from the tenant-offboarding one above. No platform-events/pkg/config
+      # equivalent for this second queue, so its concurrency stays
+      # hand-rolled via CONSUMER_CONCURRENCY (unset here — defaults to 4
+      # in code, same effective value as SQS_CONCURRENCY above).
       MEMBER_REMOVAL_SQS_QUEUE_URL: http://localstack:4566/000000000000/member-removal-tenderacl-q
       MEMBER_REMOVAL_SQS_DLQ_URL: http://localstack:4566/000000000000/member-removal-tenderacl-q-dlq
       AWS_REGION: us-east-1

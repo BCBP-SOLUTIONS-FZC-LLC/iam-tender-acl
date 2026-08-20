@@ -310,7 +310,12 @@ jobs:
             echo "PROMETHEUS_URL not set — skipping error-rate check"
             exit 0
           fi
-          QUERY='sum(rate(tender_acl_requests_total{job=~".*tender-acl.*",status=~"5.."}[2m]))/sum(rate(tender_acl_requests_total{job=~".*tender-acl.*"}[2m]))'
+          # http_requests_total, not a tender_acl_-prefixed name: this
+          # service passes generic per-request HTTP metrics through from
+          # platform-gincommon's own ObservabilityMiddlewares rather than
+          # duplicating them (see internal/adapter/outbound/metrics).
+          # error_class="server_error" is gincommon's 5xx bucket.
+          QUERY='sum(rate(http_requests_total{job=~".*tender-acl.*",error_class="server_error"}[2m]))/sum(rate(http_requests_total{job=~".*tender-acl.*"}[2m]))'
           # Sleep AFTER confirming Prometheus is configured so the 2-minute window
           # only runs when there is actually something to measure.
           sleep 120

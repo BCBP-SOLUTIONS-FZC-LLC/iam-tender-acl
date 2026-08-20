@@ -19,7 +19,6 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"go.opentelemetry.io/otel"
 	"golang.org/x/sync/errgroup"
@@ -32,6 +31,7 @@ import (
 	aclpostgres "github.com/BCBP-SOLUTIONS-FZC-LLC/iam-tender-acl/internal/adapter/outbound/postgres"
 	"github.com/BCBP-SOLUTIONS-FZC-LLC/iam-tender-acl/internal/adapter/outbound/valkey"
 	"github.com/BCBP-SOLUTIONS-FZC-LLC/iam-tender-acl/internal/core/service"
+	eventsconfig "github.com/BCBP-SOLUTIONS-FZC-LLC/platform-events/pkg/config"
 	events "github.com/BCBP-SOLUTIONS-FZC-LLC/platform-events/pkg/events"
 	gincommon "github.com/BCBP-SOLUTIONS-FZC-LLC/platform-gincommon/pkg/gincommon"
 	pgcommon "github.com/BCBP-SOLUTIONS-FZC-LLC/platform-pgcommon/pkg/pgcommon"
@@ -55,6 +55,21 @@ func run() error {
 
 	logger := newLogger(cfg)
 	slog.SetDefault(logger)
+	mapLogger := slogMapLogger{l: logger}
+
+	// SQS_QUEUE_URL and every other tenant-lifecycle-tenderacl-q tunable
+	// (SQS_MAX_MESSAGES/SQS_WAIT_SECONDS/SQS_VISIBILITY_TIMEOUT/
+	// SQS_CONCURRENCY/SQS_MAX_RECEIVE_COUNT) are loaded from
+	// platform-events/pkg/config rather than hand-rolled here, matching
+	// pgcommon.ConfigFromEnv's precedent below — this is the queue LoadSQS
+	// was designed for (a single queue per service); member-removal-
+	// tenderacl-q below has no such helper (LoadSQS has no concept of a
+	// second queue) and stays hand-rolled in config.go/loadConfig.
+	sqsEnv := eventsconfig.LoadSQS()
+	if validateErr := sqsEnv.Validate(); validateErr != nil {
+		return fmt.Errorf("load SQS config: %w", validateErr)
+	}
+	eventsconfig.LogWarningsTo(mapLogger, sqsEnv.Warnings)
 
 	baseCtx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
@@ -107,17 +122,53 @@ func run() error {
 	if err != nil {
 		return fmt.Errorf("connect to postgres: %w", err)
 	}
-	defer pgPool.Close()
+	// DrainAndClose, not a bare Close — LLD §16.4's documented shutdown
+	// sequence. Registered before rawPool's below so it runs last (LIFO):
+	// this is the RLS-bound pool every TAC-1/2/3/4 request and both
+	// consumers' repository calls go through, so it should be the last
+	// thing to stop accepting new work. In practice httpServer.Shutdown and
+	// both consumers' Stop() (the shutdown goroutine below) already wait
+	// for in-flight work to finish before this defer ever runs, so the
+	// drain here should always complete immediately — DrainAndClose is
+	// still the correct call over Close, as defense in depth against that
+	// ordering ever changing.
+	defer func() {
+		drainCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		if drainErr := pgPool.DrainAndClose(drainCtx); drainErr != nil {
+			logger.Error("postgres pool drain failed", slog.String("error", drainErr.Error()))
+		}
+	}()
 
 	// processed_events carries no RLS (LLD §7.3) and is accessed only by the
-	// tenant-offboarding consumer via the service role — a plain pgxpool.Pool
-	// on the same DSN, entirely separate from the RLS-bound pgcommon.Pool
-	// above (which has no exported accessor to an underlying raw pool).
-	rawPool, err := pgxpool.New(baseCtx, cfg.DatabaseURL)
+	// two consumers via the service role — a second pgcommon.Pool on the
+	// same DSN, entirely separate from the RLS-bound pool above (which has
+	// no exported accessor to an underlying raw pool) but still going
+	// through pgcommon.NewPool rather than a bare pgxpool.New: no
+	// GUCProvider is set, so no GUC injection is ever attempted for this
+	// table, but this pool still gets the same slow-query logging and OTel
+	// query spans as the main pool, instead of being entirely invisible to
+	// both (a prior version used a bare *pgxpool.Pool here and had neither).
+	rawPoolCfg := pgcommon.Config{
+		DSN:           cfg.DatabaseURL,
+		PGBouncerMode: pgCfg.PGBouncerMode,
+		Logger:        slogDomainLogger{l: logger},
+		Tracer:        otelSpanTracer{tracer: tracer},
+	}
+	rawPool, err := pgcommon.NewPool(baseCtx, rawPoolCfg)
 	if err != nil {
 		return fmt.Errorf("connect raw postgres pool: %w", err)
 	}
-	defer rawPool.Close()
+	// Same DrainAndClose reasoning as pgPool above — this defer runs before
+	// pgPool's (LIFO), so processed_events stops accepting new WithConn
+	// calls slightly ahead of the main pool.
+	defer func() {
+		drainCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		if drainErr := rawPool.DrainAndClose(drainCtx); drainErr != nil {
+			logger.Error("raw postgres pool drain failed", slog.String("error", drainErr.Error()))
+		}
+	}()
 
 	valkeyClient := valkey.NewClient(valkey.ClientConfig{Addr: cfg.ValkeyAddr, Password: cfg.ValkeyPassword})
 	defer func() {
@@ -137,6 +188,21 @@ func run() error {
 		return fmt.Errorf("build metrics: %w", err)
 	}
 
+	// Activates platform-events' own consumer-side Prometheus metrics —
+	// events_consumed_total, events_consume_duration_seconds, and
+	// sqs_receive/delete/visibility_extension_errors_total (the latter two
+	// the library's own docs flag as causing duplicate delivery when
+	// non-zero, exactly the failure mode this service's processed_events
+	// idempotency ledger exists to survive). No other wiring needed:
+	// internal/adapter/outbound/sqs's consumer already calls the
+	// corresponding Record* functions unconditionally at every relevant
+	// point for both queues below — they no-op until Init/InitWithRegisterer
+	// runs once, which a prior version of this process never called.
+	// InitWithRegisterer (not Init, which always uses
+	// prometheus.DefaultRegisterer) to match the explicit-registerer
+	// convention above.
+	events.InitWithRegisterer("tender-acl", buildVersion, gincommon.MetricsRegisterer())
+
 	checker := membershipcheck.NewHTTPChecker(cfg.CoreInternalBaseURL, nil, cfg.MembershipCheckTimeout)
 
 	repo := aclpostgres.NewTenderACLRepository(pgPool)
@@ -153,7 +219,7 @@ func run() error {
 		Enabled:     cfg.DocsEnabled,
 		AuthToken:   cfg.DocsAuthToken,
 	}
-	router := httpadapter.NewRouter(handler, pgPool, aclCache, svcMetrics, logger, tracing, docs)
+	router := httpadapter.NewRouter(handler, pgPool, aclCache, logger, tracing, docs)
 
 	httpServer := &http.Server{
 		Addr:              ":" + cfg.HTTPPort,
@@ -171,21 +237,18 @@ func run() error {
 
 	offboardingConsumer := consumer.NewOffboardingConsumer(repo, offboardingProcessedEvents, svcMetrics, logger, tracer)
 	eventsConsumer, err := events.NewSQSConsumer(
-		events.SQSConfig{
-			QueueURL: cfg.SQSQueueURL,
-			Region:   cfg.AWSRegion,
-		},
+		eventsconfig.SQSConfigFromEnv(sqsEnv, mapLogger),
 		offboardingConsumer.Handle,
-		events.WithConcurrency(getEnvInt("CONSUMER_CONCURRENCY", 4)),
-		// No WithMaxReceiveCount/WithDeadLetterHandler here: redrive after
-		// maxReceiveCount=5 is handled entirely by tenant-lifecycle-tenderacl-q's
-		// own SQS redrive policy (deploy/iam/README.md — this pod has no
-		// SQS permissions on either DLQ, so an in-process dead-letter
-		// handler would have nothing to do with a message anyway).
-		// WithMaxReceiveCount without a paired WithDeadLetterHandler is a
-		// no-op in platform-events (the library only consults it when a
-		// dead-letter handler is registered) — a prior version of this
-		// call set it anyway, which did nothing.
+		// SQSConsumerOptions returns WithConcurrency/WithVisibilityTimeout
+		// unconditionally, plus WithMaxReceiveCount only when
+		// SQS_MAX_RECEIVE_COUNT is set (it isn't, anywhere in this
+		// service's env files) — so this can never produce the
+		// WithMaxReceiveCount-without-a-paired-WithDeadLetterHandler no-op
+		// a prior version of this call had. Redrive after maxReceiveCount=5
+		// is handled entirely by tenant-lifecycle-tenderacl-q's own SQS
+		// redrive policy (deploy/iam/README.md — this pod has no SQS
+		// permissions on either DLQ), not an in-process dead-letter handler.
+		eventsconfig.SQSConsumerOptions(sqsEnv)...,
 	)
 	if err != nil {
 		return fmt.Errorf("build tenant-lifecycle-tenderacl-q consumer: %w", err)
@@ -202,11 +265,20 @@ func run() error {
 		events.SQSConfig{
 			QueueURL: cfg.MemberRemovalQueueURL,
 			Region:   cfg.AWSRegion,
+			Logger:   mapLogger,
 		},
 		memberRemovalConsumer.Handle,
 		events.WithConcurrency(getEnvInt("CONSUMER_CONCURRENCY", 4)),
 		// See the offboarding consumer above: redrive is member-removal-tenderacl-q's
 		// own SQS redrive policy, not an in-process WithDeadLetterHandler.
+		//
+		// This queue stays hand-rolled rather than going through
+		// platform-events/pkg/config like the offboarding consumer above:
+		// LoadSQS()/SQSConfigFromEnv/SQSConsumerOptions read one fixed,
+		// unparameterized set of env var names (SQS_QUEUE_URL,
+		// SQS_CONCURRENCY, ...) with no concept of a second queue, so they
+		// can only serve one of this service's two independent
+		// subscriptions.
 	)
 	if err != nil {
 		return fmt.Errorf("build member-removal-tenderacl-q consumer: %w", err)

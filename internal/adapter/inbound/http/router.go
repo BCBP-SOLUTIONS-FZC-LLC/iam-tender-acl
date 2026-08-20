@@ -3,14 +3,12 @@ package http
 import (
 	"log/slog"
 	"net/http"
-	"time"
 
 	"github.com/gin-gonic/gin"
 
 	swaggerFiles "github.com/swaggo/files"
 	ginSwagger "github.com/swaggo/gin-swagger"
 
-	"github.com/BCBP-SOLUTIONS-FZC-LLC/iam-tender-acl/internal/adapter/outbound/metrics"
 	gincommon "github.com/BCBP-SOLUTIONS-FZC-LLC/platform-gincommon/pkg/gincommon"
 )
 
@@ -70,14 +68,13 @@ func mapToArgs(fields map[string]interface{}) []any {
 // via RequestContext.Roles), the internal mTLS-only access-check API
 // (TAC-4, no RBAC — tenant isolation from RLS alone), and the health
 // checks.
-func NewRouter(h *Handler, postgres, cache Pinger, m *metrics.Metrics, logger *slog.Logger, tracing *gincommon.TracingOptions, docs DocsConfig) *Router {
+func NewRouter(h *Handler, postgres PostgresHealth, cache Pinger, logger *slog.Logger, tracing *gincommon.TracingOptions, docs DocsConfig) *Router {
 	gin.SetMode(gin.ReleaseMode)
 	engine := gin.New()
-	engine.Use(metricsMiddleware(m))
 
 	platformLogger := slogPlatformLogger{l: logger}
 	cfg := gincommon.Config{Logger: platformLogger, ServiceName: "tender-acl", Tracing: tracing}
-	// Observability (recovery/request-id/tracing/correlation/metrics/logging)
+	// Observability (recovery/request-id/tracing/metrics/correlation/logging)
 	// applies to every route, including TAC-4. Auth (ProtectedMiddlewares)
 	// applies only to the public admin group below — TAC-4 is a mesh-only
 	// trust boundary with no RBAC/JWT check (LLD §8.2/§13.2).
@@ -88,6 +85,18 @@ func NewRouter(h *Handler, postgres, cache Pinger, m *metrics.Metrics, logger *s
 	// NOT a separate otelgin.Middleware or a hand-rolled TracerProvider in
 	// cmd/tender-acl, both since removed as redundant with what gincommon
 	// already provides.
+	//
+	// Generic per-request HTTP metrics (count/duration/status, by
+	// method+route) are gincommon's own http_requests_total/
+	// http_request_duration_seconds (also part of ObservabilityMiddlewares'
+	// MetricsMiddleware) — passed through as-is, not duplicated by a local
+	// metricsMiddleware. This service is not yet deployed, so there was no
+	// live dependency on the old tender_acl_requests_total/
+	// tender_acl_request_duration_seconds names to preserve; deploy/monitoring's
+	// SLO/alert/HPA rules and the release canary check were updated to the
+	// gincommon names in the same change. internal/adapter/outbound/metrics
+	// still owns every metric gincommon has no equivalent for — writes,
+	// grant checks, cache hits/misses, and both cascades.
 	engine.Use(gincommon.ObservabilityMiddlewares(cfg)...)
 
 	public := engine.Group("/api/v1/tenants/:id/tenders/:tender_id/acl")
@@ -150,21 +159,3 @@ func docsAuthMiddleware(token string) gin.HandlerFunc {
 
 // Handler returns the http.Handler to serve.
 func (r *Router) Handler() http.Handler { return r.engine }
-
-// metricsMiddleware records tender_acl_requests_total and
-// tender_acl_request_duration_seconds, tagged by the matched route
-// template (never the raw path, to keep label cardinality bounded).
-func metricsMiddleware(m *metrics.Metrics) gin.HandlerFunc {
-	return func(c *gin.Context) {
-		start := time.Now()
-		c.Next()
-
-		route := c.FullPath()
-		if route == "" {
-			route = "unmatched"
-		}
-		ctx := c.Request.Context()
-		m.RecordRequest(ctx, c.Request.Method, route, c.Writer.Status())
-		m.RecordRequestDuration(ctx, c.Request.Method, route, time.Since(start).Seconds())
-	}
-}

@@ -1,5 +1,5 @@
 # Prometheus Adapter ConfigMap — maps Prometheus metrics to the Custom Metrics
-# API so the HPA can scale on tender_acl_requests_per_second.
+# API so the HPA can scale on http_requests_per_second.
 #
 # Deploy into the namespace where prometheus-adapter runs (typically
 # kube-system or monitoring). Merge with any existing prometheus-adapter
@@ -9,7 +9,7 @@
 #   https://github.com/kubernetes-sigs/prometheus-adapter/blob/master/docs/config.md
 #
 # After applying, verify the metric is visible:
-#   kubectl get --raw /apis/custom.metrics.k8s.io/v1beta1 | jq '.resources[].name' | grep tender_acl
+#   kubectl get --raw /apis/custom.metrics.k8s.io/v1beta1 | jq '.resources[].name' | grep http_requests
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -21,13 +21,24 @@ metadata:
 data:
   config.yaml: |
     rules:
-      # Expose per-pod RPS as tender_acl_requests_per_second so the HPA can
-      # use type: Pods / metric: tender_acl_requests_per_second (see
+      # Expose per-pod RPS as http_requests_per_second so the HPA can use
+      # type: Pods / metric: http_requests_per_second (see
       # deploy/helm/tender-acl/templates/hpa.yaml, gated on
-      # autoscaling.targetRPSPerReplica > 0). Computed from the Prometheus
-      # counter tender_acl_requests_total scraped via the ServiceMonitor
-      # (serviceMonitor.enabled: true in Helm values).
-      - seriesQuery: 'tender_acl_requests_total{namespace!="",pod!=""}'
+      # autoscaling.targetRPSPerReplica > 0). Computed from
+      # platform-gincommon's own http_requests_total counter (its
+      # ObservabilityMiddlewares' MetricsMiddleware), scraped via the
+      # ServiceMonitor (serviceMonitor.enabled: true in Helm values) —
+      # not a tender_acl_requests_total this service used to maintain
+      # itself (this service is not yet deployed, so switching to a fully
+      # gincommon-passthrough metric had no live-HPA migration cost).
+      #
+      # http_requests_total is the same metric name every gincommon-based
+      # service in the cluster emits, but the HPA's Pods metric type
+      # resolves this query against tender-acl's own target pods only
+      # (via the namespace/pod resource overrides below plus the HPA's own
+      # object selector in hpa.yaml), so this is not cross-service
+      # ambiguous despite the generic name.
+      - seriesQuery: 'http_requests_total{namespace!="",pod!=""}'
         resources:
           overrides:
             namespace:

@@ -10,7 +10,7 @@ sequenceDiagram
 
     Client ->>+ GW: HTTP request (JWT already validated upstream)
     GW ->>+ MW: inject X-Tenant-Id / X-User-Id / X-Tenant-Roles headers
-    Note over MW: otelgin.Middleware — OTel span<br/>RequestContextMiddleware — parse headers into RequestContext<br/>Recovery — panic -> 500 JSON, never crashes the process<br/>Logger — structured request log<br/>metricsMiddleware — tender_acl_requests_total / _duration_seconds
+    Note over MW: otelgin.Middleware — OTel span<br/>RequestContextMiddleware — parse headers into RequestContext<br/>Recovery — panic -> 500 JSON, never crashes the process<br/>Logger — structured request log<br/>MetricsMiddleware — gincommon's own http_requests_total / _duration_seconds (passthrough, not a tender_acl_* duplicate)
 
     alt public admin endpoint (TAC-1 List / TAC-2 Grant / TAC-3 Revoke)
         MW ->>+ H: c.Next()
@@ -62,5 +62,5 @@ sequenceDiagram
 
     H -->>- MW: response (200/201/403/422/503)
     MW -->>- GW: return
-    Note over MW: tender_acl_requests_total / _duration_seconds recorded<br/>OTel span ended · structured log line written
+    Note over MW: gincommon's http_requests_total / _duration_seconds recorded<br/>OTel span ended · structured log line written
     GW -->>- Client: HTTP response

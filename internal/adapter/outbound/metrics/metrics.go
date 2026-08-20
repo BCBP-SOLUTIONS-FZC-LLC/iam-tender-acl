@@ -1,27 +1,31 @@
-// Package metrics registers every Prometheus instrument this service emits,
-// named per tender-acl-service-lld.md §14.2. Uses prometheus/client_golang
-// directly, registered onto gincommon.MetricsRegisterer() (see NewMetrics) —
-// the same registry platform-gincommon's own HTTP metrics and this
-// process's /metrics endpoint (promhttp.Handler(), cmd/tender-acl/main.go)
-// already share — rather than a parallel OpenTelemetry metrics pipeline,
-// matching every sibling IAM service's convention (iam-org-membership,
-// iam-catalog-admin, iam-user-profile).
+// Package metrics registers every tender-acl-specific Prometheus instrument
+// this service emits, named per tender-acl-service-lld.md §14.2. Uses
+// prometheus/client_golang directly, registered onto
+// gincommon.MetricsRegisterer() (see NewMetrics) — the same registry
+// platform-gincommon's own HTTP metrics and this process's /metrics
+// endpoint (promhttp.Handler(), cmd/tender-acl/main.go) already share —
+// rather than a parallel OpenTelemetry metrics pipeline, matching every
+// sibling IAM service's convention (iam-org-membership, iam-catalog-admin,
+// iam-user-profile).
+//
+// Generic per-request HTTP metrics (count/duration/status, by
+// method+route) are deliberately NOT reimplemented here: gincommon's own
+// ObservabilityMiddlewares already records those as http_requests_total/
+// http_request_duration_seconds for every route this service serves, so
+// this package fully passes that through rather than duplicating it under
+// a tender_acl_* name. This service is not yet deployed, so making that
+// switch carried no live-dashboard cost; deploy/monitoring's SLO/alert/HPA
+// rules and the release canary check were updated to gincommon's metric
+// names in the same change (see CHANGELOG.md). Everything below is a
+// metric gincommon has no equivalent for: business-level write/grant-check/
+// cache/cascade outcomes.
 package metrics
 
 import (
 	"context"
-	"strconv"
 
 	"github.com/prometheus/client_golang/prometheus"
 )
-
-// requestDurationBuckets must include 0.020 exactly — deploy/monitoring's
-// SLO-1 recording rule (tender_acl:tac4_latency_sli:ratio_rate_5m) queries
-// tender_acl_request_duration_seconds_bucket{le="0.020"} directly; any
-// bucket set missing that exact boundary silently breaks the recording
-// rule (no data, not an error) rather than the underlying SLO burn-rate
-// alerts firing incorrectly.
-var requestDurationBuckets = []float64{0.001, 0.002, 0.005, 0.01, 0.02, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10}
 
 // cacheKeyLabel is the fixed value of the LLD §14.2 cache metrics'
 // {key} label — there is exactly one cache region (tac:acl, LLD §9), so
@@ -30,10 +34,10 @@ var requestDurationBuckets = []float64{0.001, 0.002, 0.005, 0.01, 0.02, 0.05, 0.
 // later has somewhere to go without a metric rename.
 const cacheKeyLabel = "tac:acl"
 
-// Metrics holds every Prometheus instrument this service emits.
+// Metrics holds every tender-acl-specific Prometheus instrument this
+// service emits. Generic per-request HTTP metrics are not among them — see
+// the package doc comment.
 type Metrics struct {
-	requestsTotal             *prometheus.CounterVec
-	requestDuration           *prometheus.HistogramVec
 	writesTotal               *prometheus.CounterVec
 	grantChecksTotal          *prometheus.CounterVec
 	checkCallsTotal           *prometheus.CounterVec
@@ -64,21 +68,6 @@ func NewMetrics(reg ...prometheus.Registerer) (*Metrics, error) {
 		registerer = reg[0]
 	}
 	m := &Metrics{
-		requestsTotal: prometheus.NewCounterVec(
-			prometheus.CounterOpts{
-				Name: "tender_acl_requests_total",
-				Help: "Total HTTP requests handled, by method/path/status",
-			},
-			[]string{"method", "path", "status"},
-		),
-		requestDuration: prometheus.NewHistogramVec(
-			prometheus.HistogramOpts{
-				Name:    "tender_acl_request_duration_seconds",
-				Help:    "HTTP request duration in seconds, by method/path",
-				Buckets: requestDurationBuckets,
-			},
-			[]string{"method", "path"},
-		),
 		writesTotal: prometheus.NewCounterVec(
 			prometheus.CounterOpts{
 				Name: "tender_acl_writes_total",
@@ -147,7 +136,7 @@ func NewMetrics(reg ...prometheus.Registerer) (*Metrics, error) {
 	}
 
 	for _, c := range []prometheus.Collector{
-		m.requestsTotal, m.requestDuration, m.writesTotal,
+		m.writesTotal,
 		m.grantChecksTotal, m.checkCallsTotal, m.cacheHitsTotal, m.cacheMissesTotal,
 		m.cascadeTotal, m.memberRemovalCascadeTotal,
 	} {
@@ -162,16 +151,6 @@ func NewMetrics(reg ...prometheus.Registerer) (*Metrics, error) {
 	m.cacheMissesTotal.WithLabelValues(cacheKeyLabel)
 
 	return m, nil
-}
-
-// RecordRequest increments tender_acl_requests_total, tagged by method/route/status.
-func (m *Metrics) RecordRequest(_ context.Context, method, route string, status int) {
-	m.requestsTotal.WithLabelValues(method, route, strconv.Itoa(status)).Inc()
-}
-
-// RecordRequestDuration records tender_acl_request_duration_seconds, tagged by method/route.
-func (m *Metrics) RecordRequestDuration(_ context.Context, method, route string, seconds float64) {
-	m.requestDuration.WithLabelValues(method, route).Observe(seconds)
 }
 
 // RecordWrite increments tender_acl_writes_total for a grant/revoke op, tagged by result.

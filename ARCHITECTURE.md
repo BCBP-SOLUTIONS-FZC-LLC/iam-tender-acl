@@ -171,7 +171,7 @@ sequenceDiagram
 
     Client ->>+ GW: HTTP request (JWT already validated upstream)
     GW ->>+ MW: inject X-Tenant-Id / X-User-Id / X-Tenant-Roles headers
-    Note over MW: otelgin.Middleware — OTel span<br/>RequestContextMiddleware — parse headers into RequestContext<br/>Recovery — panic -> 500 JSON, never crashes the process<br/>Logger — structured request log<br/>metricsMiddleware — tender_acl_requests_total / _duration_seconds
+    Note over MW: otelgin.Middleware — OTel span<br/>RequestContextMiddleware — parse headers into RequestContext<br/>Recovery — panic -> 500 JSON, never crashes the process<br/>Logger — structured request log<br/>MetricsMiddleware — gincommon's own http_requests_total / _duration_seconds (passthrough, not a tender_acl_* duplicate)
 
     alt public admin endpoint (TAC-1 List / TAC-2 Grant / TAC-3 Revoke)
         MW ->>+ H: c.Next()
@@ -223,7 +223,7 @@ sequenceDiagram
 
     H -->>- MW: response (200/201/204/403/422/503)
     MW -->>- GW: return
-    Note over MW: tender_acl_requests_total / _duration_seconds recorded<br/>OTel span ended · structured log line written
+    Note over MW: gincommon's http_requests_total / _duration_seconds recorded<br/>OTel span ended · structured log line written
     GW -->>- Client: HTTP response
 ```
 > Source: [`docs/architecture/mermaid/request-flow.mmd`](docs/architecture/mermaid/request-flow.mmd)
@@ -415,11 +415,20 @@ sequenceDiagram
 
 ## Observability
 
-- **Metrics** (Prometheus, `tender_acl_*` prefix, LLD §14.2): `tender_acl_requests_total{method,path,status}`,
-  `tender_acl_request_duration_seconds{method,path}`, `tender_acl_writes_total{op,result}`,
-  `tender_acl_grant_checks_total{status}` (`active`/`not_active`/`unavailable`),
-  `tender_acl_check_calls_total{status}` (`has_access`/`no_access`),
-  `tender_acl_tenant_offboarding_cascade_total{result}`.
+- **Metrics** (Prometheus, LLD §14.2):
+  - Generic per-request HTTP metrics are platform-gincommon's own —
+    `http_requests_total{method,route,status_class,error_class}`,
+    `http_request_duration_seconds{method,route,status_class,error_class}` — passed through
+    as-is (ObservabilityMiddlewares' MetricsMiddleware) rather than duplicated under a
+    `tender_acl_*` name. This service is not yet deployed, so this is the only naming it has
+    ever shipped with — see CHANGELOG.md.
+  - Business-level metrics keep the `tender_acl_*` prefix, since gincommon has no equivalent:
+    `tender_acl_writes_total{op,result}`,
+    `tender_acl_grant_checks_total{status}` (`active`/`not_active`/`unavailable`),
+    `tender_acl_check_calls_total{status}` (`has_access`/`no_access`),
+    `tender_acl_cache_hits_total{key}` / `tender_acl_cache_misses_total{key}`,
+    `tender_acl_tenant_offboarding_cascade_total{result}`,
+    `tender_acl_member_removal_cascade_total{result}`.
 - **Tracing**: OTel Go SDK, W3C Trace Context. Span shape:
   `otelgin (inbound.http) → service.ACLService.<method> → outbound.postgres` (+
   `outbound.membershipcheck` only on Grant, + `tac:*` cache read/DEL spans on

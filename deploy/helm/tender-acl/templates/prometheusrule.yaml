@@ -42,13 +42,18 @@ spec:
               Current healthy count: {{ "{{ $value }}" }}.
 
     # ── TAC-4 error rate — LLD §14.5 "TAC-4 error rate >10%/5min → SEV-2" ──
+    # Sourced from platform-gincommon's own http_requests_total, passed
+    # through as-is rather than duplicated under a tender_acl_* name (this
+    # service is not yet deployed, so making that switch had no
+    # live-dashboard migration cost) — route/error_class are gincommon's
+    # label names, not path/status.
     - name: tender_acl_errors
       rules:
         - alert: TenderAclTAC4HighErrorRate
           expr: |
-            sum(rate(tender_acl_requests_total{job={{ include "tender-acl.fullname" . | quote }}, path=~".*/internal/.*acl.*", status=~"5.."}[5m]))
+            sum(rate(http_requests_total{job={{ include "tender-acl.fullname" . | quote }}, route=~".*/internal/.*acl.*", error_class="server_error"}[5m]))
               /
-            clamp_min(sum(rate(tender_acl_requests_total{job={{ include "tender-acl.fullname" . | quote }}, path=~".*/internal/.*acl.*"}[5m])), 0.001)
+            clamp_min(sum(rate(http_requests_total{job={{ include "tender-acl.fullname" . | quote }}, route=~".*/internal/.*acl.*"}[5m])), 0.001)
             > 0.10
           for: 5m
           labels:
@@ -65,9 +70,9 @@ spec:
 
         - alert: TenderAclHighErrorRate
           expr: |
-            sum(rate(tender_acl_requests_total{job={{ include "tender-acl.fullname" . | quote }}, status=~"5.."}[5m]))
+            sum(rate(http_requests_total{job={{ include "tender-acl.fullname" . | quote }}, error_class="server_error"}[5m]))
               /
-            clamp_min(sum(rate(tender_acl_requests_total{job={{ include "tender-acl.fullname" . | quote }}}[5m])), 0.001)
+            clamp_min(sum(rate(http_requests_total{job={{ include "tender-acl.fullname" . | quote }}}[5m])), 0.001)
             > 0.05
           for: 5m
           labels:

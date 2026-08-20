@@ -8,7 +8,10 @@ import (
 )
 
 // config holds every environment-variable-driven setting for this process.
-// DATABASE_URL and SQS_QUEUE_URL have no safe default and are required.
+// DATABASE_URL and MEMBER_REMOVAL_SQS_QUEUE_URL have no safe default and are
+// required. SQS_QUEUE_URL (the tenant-offboarding queue) is validated
+// separately in main.go's run(), via platform-events/pkg/config's own
+// SQSConfigEnv.Validate() — see the SQSQueueURL removal note below.
 type config struct {
 	HTTPPort    string
 	MetricsPort string
@@ -29,12 +32,19 @@ type config struct {
 	CoreInternalBaseURL    string
 	MembershipCheckTimeout time.Duration
 
-	SQSQueueURL string
 	// MemberRemovalQueueURL backs member-removal-tenderacl-q (ADR-0007 Wave
 	// 3 Phase 3, O_AND_M_DELTA.md §5 Option B) — the per-user-removal ACL
-	// cascade, separate from SQSQueueURL's tenant-offboarding cascade.
+	// cascade, separate from the tenant-offboarding cascade's queue. No
+	// field for that one here: SQS_QUEUE_URL and every other SQS_* tunable
+	// for it are loaded directly from platform-events/pkg/config.LoadSQS()
+	// in main.go instead of being duplicated into this struct — that
+	// package has no concept of a second queue, so MemberRemovalQueueURL
+	// stays hand-rolled here.
 	MemberRemovalQueueURL string
-	AWSRegion             string
+	// AWSRegion is shared by both SQS queues; also duplicated into
+	// LoadSQS()'s own SQSConfigEnv.Region for the first (same env var,
+	// same default, read twice — not a source of drift).
+	AWSRegion string
 
 	OTELExporterOTLPEndpoint string
 
@@ -60,7 +70,6 @@ func loadConfig() (config, error) {
 		ValkeyPassword:         os.Getenv("VALKEY_PASSWORD"),
 		CoreInternalBaseURL:    getEnv("CORE_INTERNAL_BASE_URL", "http://org-membership.iam.svc.cluster.local"),
 		MembershipCheckTimeout: time.Duration(getEnvInt("MEMBERSHIP_CHECK_TIMEOUT_MS", 300)) * time.Millisecond,
-		SQSQueueURL:            os.Getenv("SQS_QUEUE_URL"),
 		MemberRemovalQueueURL:  os.Getenv("MEMBER_REMOVAL_SQS_QUEUE_URL"),
 		AWSRegion:              getEnv("AWS_REGION", "us-east-1"),
 
@@ -78,9 +87,8 @@ func loadConfig() (config, error) {
 	if cfg.DatabaseURL == "" {
 		return config{}, fmt.Errorf("DATABASE_URL is required")
 	}
-	if cfg.SQSQueueURL == "" {
-		return config{}, fmt.Errorf("SQS_QUEUE_URL is required")
-	}
+	// SQS_QUEUE_URL is validated in main.go's run(), via
+	// platform-events/pkg/config's own SQSConfigEnv.Validate().
 	if cfg.MemberRemovalQueueURL == "" {
 		return config{}, fmt.Errorf("MEMBER_REMOVAL_SQS_QUEUE_URL is required")
 	}

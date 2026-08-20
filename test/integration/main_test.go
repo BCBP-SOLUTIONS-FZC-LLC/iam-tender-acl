@@ -86,8 +86,19 @@ func runTestMain(m *testing.M) int {
 	defer pool.Close()
 
 	repo = aclpostgres.NewTenderACLRepository(pool)
-	processedEvents = consumer.NewProcessedEvents(adminPool, "tenant_lifecycle_cleanup")
-	memberRemovalProcessedEvents = consumer.NewProcessedEvents(adminPool, "member_removal")
+
+	// A separate pgcommon.Pool on the admin DSN (no GUCProvider — this table
+	// has no RLS), matching production's rawPool in cmd/tender-acl/main.go.
+	// adminPool (the bare *pgxpool.Pool above) stays in use for every other
+	// raw assertion query in this package's test files.
+	processedEventsPool, err := pgcommon.NewPool(ctx, pgcommon.Config{DSN: pg.AdminDSN})
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "connect processed_events pgcommon pool:", err)
+		return 1
+	}
+	defer processedEventsPool.Close()
+	processedEvents = consumer.NewProcessedEvents(processedEventsPool, "tenant_lifecycle_cleanup")
+	memberRemovalProcessedEvents = consumer.NewProcessedEvents(processedEventsPool, "member_removal")
 
 	valkeyClient = valkey.NewClient(valkey.ClientConfig{Addr: valkeyAddr})
 	defer func() { _ = valkeyClient.Close() }()

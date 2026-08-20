@@ -38,6 +38,39 @@ func domainFieldsToArgs(fields []domain.Field) []any {
 	return args
 }
 
+// slogMapLogger adapts *slog.Logger to the map[string]interface{}-based
+// Logger interface both platform-gincommon's and platform-events' Config
+// structs expect (identical method shape in both libraries — same
+// structural-typing precedent as slogPlatformLogger in
+// internal/adapter/inbound/http/router.go, duplicated here rather than
+// exported from that package since it lives in a different module-internal
+// package). Wired into events.SQSConfig.Logger (both consumers) and passed
+// to platform-events/pkg/config.LogWarningsTo, so SQS-level warnings/errors
+// flow through the same structured logger as everything else in this
+// process, instead of going nowhere — both were previously left unset.
+type slogMapLogger struct{ l *slog.Logger }
+
+func (a slogMapLogger) Debug(msg string, fields map[string]interface{}) {
+	a.l.Debug(msg, mapFieldsToArgs(fields)...)
+}
+func (a slogMapLogger) Info(msg string, fields map[string]interface{}) {
+	a.l.Info(msg, mapFieldsToArgs(fields)...)
+}
+func (a slogMapLogger) Warn(msg string, fields map[string]interface{}) {
+	a.l.Warn(msg, mapFieldsToArgs(fields)...)
+}
+func (a slogMapLogger) Error(msg string, fields map[string]interface{}) {
+	a.l.Error(msg, mapFieldsToArgs(fields)...)
+}
+
+func mapFieldsToArgs(fields map[string]interface{}) []any {
+	args := make([]any, 0, len(fields)*2)
+	for k, v := range fields {
+		args = append(args, k, v)
+	}
+	return args
+}
+
 // otelSpanTracer adapts an OTel trace.Tracer to the structural
 // StartSpan(ctx, name) (context.Context, func()) shape pgcommon.Config.Tracer
 // expects (satisfied here without importing pgcommon's internal port

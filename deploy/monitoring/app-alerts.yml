@@ -14,10 +14,15 @@
 #   - iam-org-membership unreachable during TAC-2 > 15min → SEV-3 (warning)
 #   - DLQ depth > 0                                     → SEV-3 (warning)
 #
-# Labels on HTTP metrics:
-#   method — HTTP method
-#   path   — matched route template (e.g. /api/v1/tenants/:id/tenders/:tender_id/acl)
-#   status — HTTP status code
+# Generic HTTP request metrics (used below by the TAC-4/overall error-rate
+# alerts) are platform-gincommon's own http_requests_total, passed through
+# as-is rather than duplicated under a tender_acl_* name (this service is
+# not yet deployed, so making that switch had no live-dashboard migration
+# cost). Labels:
+#   method       — HTTP method
+#   route        — matched route template (e.g. /api/v1/tenants/:id/tenders/:tender_id/acl)
+#   status_class — "2xx"/"4xx"/"5xx"
+#   error_class  — "success"/"client_error"/"server_error"
 #
 # Every alert carries:
 #   severity: critical | warning — routes to PagerDuty (critical) or Jira (warning)
@@ -62,9 +67,9 @@ groups:
 
       - alert: TenderAclTAC4HighErrorRate
         expr: |
-          sum(rate(tender_acl_requests_total{job="tender-acl", path=~".*/internal/.*acl.*", status=~"5.."}[5m]))
+          sum(rate(http_requests_total{job="tender-acl", route=~".*/internal/.*acl.*", error_class="server_error"}[5m]))
             /
-          clamp_min(sum(rate(tender_acl_requests_total{job="tender-acl", path=~".*/internal/.*acl.*"}[5m])), 0.001)
+          clamp_min(sum(rate(http_requests_total{job="tender-acl", route=~".*/internal/.*acl.*"}[5m])), 0.001)
           > 0.10
         for: 5m
         labels:
@@ -81,9 +86,9 @@ groups:
 
       - alert: TenderAclHighErrorRate
         expr: |
-          sum(rate(tender_acl_requests_total{job="tender-acl", status=~"5.."}[5m]))
+          sum(rate(http_requests_total{job="tender-acl", error_class="server_error"}[5m]))
             /
-          clamp_min(sum(rate(tender_acl_requests_total{job="tender-acl"}[5m])), 0.001)
+          clamp_min(sum(rate(http_requests_total{job="tender-acl"}[5m])), 0.001)
           > 0.05
         for: 5m
         labels:

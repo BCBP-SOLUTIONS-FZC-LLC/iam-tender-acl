@@ -76,15 +76,25 @@ env:
 
   # AWS SQS — TenantOffboarded consumer (receive-only; this service
   # publishes zero events, so there is no SNS topic to configure).
+  # SQS_QUEUE_URL and SQS_CONCURRENCY are loaded by
+  # platform-events/pkg/config's LoadSQS, not this service's own config.go —
+  # SQS_CONCURRENCY: "4" (not LoadSQS's own default of 1) to match this
+  # queue's prior CONSUMER_CONCURRENCY-driven concurrency.
   SQS_QUEUE_URL: ""
   SQS_DLQ_URL: ""
+  SQS_CONCURRENCY: "4"
   # ADR-0007 Wave 3 Phase 3 (O_AND_M_DELTA.md §5 Option B) — the per-user-
   # removal ACL cascade, a second/independent SQS subscription from the
   # tenant-offboarding one above (separate queue/DLQ, not a discriminated
   # payload on the same queue — see MemberRemovalConsumer's doc comment).
+  # No platform-events/pkg/config equivalent for this second queue (LoadSQS
+  # only covers one queue per service), so its concurrency stays hand-rolled
+  # via CONSUMER_CONCURRENCY below.
   MEMBER_REMOVAL_SQS_QUEUE_URL: ""
   MEMBER_REMOVAL_SQS_DLQ_URL: ""
   AWS_REGION: "us-east-1"
+  # member-removal-tenderacl-q's concurrency only — see SQS_CONCURRENCY
+  # above for tenant-lifecycle-tenderacl-q's.
   CONSUMER_CONCURRENCY: "4"
 
   # OpenTelemetry. Tracing goes through platform-gincommon's

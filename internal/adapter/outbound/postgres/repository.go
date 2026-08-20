@@ -27,8 +27,19 @@ import (
 // directly from tenantID here, independent of any gincommon RequestContext,
 // so this works identically whether the caller is an HTTP handler or the
 // tenant-offboarding consumer (which has no HTTP request at all).
+//
+// WithValidatedGUCSet, not the plain WithGUCSet: pgcommon's own docs call
+// this the preferred helper, since it catches an inconsistent GUCSet (here,
+// that could only mean a future caller starts setting UserID without
+// TenantID) at injection time rather than deep inside RunInTx. Not routed
+// through wrapConnErr below — a validation failure is a programming error,
+// not a connectivity failure, so it must not be misclassified as
+// dependency_unavailable.
 func withTenant(ctx context.Context, pool *pgcommon.Pool, tenantID uuid.UUID, fn func(context.Context, pgx.Tx) error) error {
-	ctx = pgcommon.WithGUCSet(ctx, pgdomain.GUCSet{TenantID: tenantID.String()})
+	ctx, err := pgcommon.WithValidatedGUCSet(ctx, pgdomain.GUCSet{TenantID: tenantID.String()})
+	if err != nil {
+		return fmt.Errorf("withTenant: invalid GUCSet for tenant %s: %w", tenantID, err)
+	}
 	return wrapConnErr(pgcommon.RunInTx(ctx, pool, pgx.TxOptions{}, fn))
 }
 

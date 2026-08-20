@@ -36,10 +36,16 @@ spec:
     # with the rule at deploy/monitoring/prometheus-adapter-rule.yaml.
     # Without it this metric is silently absent from the custom metrics API
     # and HPA falls back to CPU/memory only.
+    #
+    # http_requests_per_second, not a tender_acl_-prefixed name: derived
+    # from platform-gincommon's own http_requests_total, passed through
+    # rather than duplicated (see prometheus-adapter-rule.yaml). The Pods
+    # metric type still scopes this to tender-acl's own pods only, via
+    # this HPA's scaleTargetRef/pod selector, despite the generic name.
     - type: Pods
       pods:
         metric:
-          name: tender_acl_requests_per_second
+          name: http_requests_per_second
         target:
           type: AverageValue
           averageValue: {{ .Values.autoscaling.targetRPSPerReplica }}

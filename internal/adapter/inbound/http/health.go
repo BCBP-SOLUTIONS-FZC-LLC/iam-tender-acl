@@ -6,16 +6,28 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+
+	pgcommon "github.com/BCBP-SOLUTIONS-FZC-LLC/platform-pgcommon/pkg/pgcommon"
 )
 
 // Pinger is satisfied by any dependency this adapter must check for
-// readiness (*pgcommon.Pool, port.Cache both already implement it).
+// readiness with a plain liveness probe (port.Cache already implements it).
 type Pinger interface {
 	Ping(ctx context.Context) error
 }
 
+// PostgresHealth is satisfied by *pgcommon.Pool. Used for the Postgres check
+// specifically instead of the plain Pinger: pgcommon.Pool.Health's own doc
+// comment recommends exposing it at /healthz or /readyz precisely because it
+// carries pool connection stats (total/idle/acquired/max/utilization)
+// alongside the liveness ping — a bare up/down bool discards exactly the
+// data that would help diagnose pool exhaustion during an incident.
+type PostgresHealth interface {
+	Health(ctx context.Context) pgcommon.HealthStatus
+}
+
 type healthHandlers struct {
-	postgres Pinger
+	postgres PostgresHealth
 	cache    Pinger
 }
 
@@ -41,11 +53,19 @@ func (h *healthHandlers) readyz(c *gin.Context) {
 	healthy := true
 	checks := gin.H{}
 
-	if err := h.postgres.Ping(ctx); err != nil {
+	hs := h.postgres.Health(ctx)
+	if hs.Healthy {
+		checks["postgres"] = "ok"
+	} else {
 		checks["postgres"] = "error"
 		healthy = false
-	} else {
-		checks["postgres"] = "ok"
+	}
+	checks["postgres_pool"] = gin.H{
+		"total_conns":    hs.TotalConns,
+		"idle_conns":     hs.IdleConns,
+		"acquired_conns": hs.AcquiredConns,
+		"max_conns":      hs.MaxConns,
+		"utilization":    hs.Utilization,
 	}
 
 	if err := h.cache.Ping(ctx); err != nil {
