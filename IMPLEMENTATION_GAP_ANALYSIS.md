@@ -29,7 +29,7 @@ reachable — and that this repo deliberately preserved that unchanged behavior 
 requiring its own review rather than something to add silently.
 
 **Now implemented**: `Revoke()` (`internal/adapter/outbound/postgres/repository.go`) gates the
-`UPDATE` on `record_version = $4` (the caller's last-read version), matching the LLD's §11.2/§12.1
+`UPDATE` on `record_version = $4` (the caller's last-read version), matching the LLD's §11.3/§12.1
 text exactly. Zero rows affected (stale version, already revoked, or no such row) returns
 `ErrCodeOptimisticLockConflict`/`409`, which is no longer dead code — it is exercised by both
 `TestHandler_Revoke_VersionConflict_Returns409` (unit) and `TestE2E_RevokeStaleVersion_Returns409`
