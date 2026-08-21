@@ -35,6 +35,7 @@
 | 2.12 | 2026-08-20 | **New capability, not a correction: a browsable HTML viewer for `api/asyncapi.yaml` (`GET /asyncapi`/`GET /asyncapi.yaml`), ported from `iam-user-profile`'s identical viewer, added to this document's §6 package tree and §10.3.** No behavior change to the event contract itself — `api/asyncapi.yaml` gains only `components.tags.published`/`consumed` (both existing operations tagged `consumed`) so the viewer's Published/Consumed split has something to key off; the "Published Messages" section is omitted entirely rather than rendered empty, since this service publishes zero events (TAC-EVT-1). A new `api/embed.go` (`//go:embed`) bakes the spec into the compiled binary rather than reading it from disk at request time — the `Dockerfile`'s final stage copies only the binary into the distroless runtime image, so a disk-read approach (as `iam-user-profile`'s own viewer still uses, unaddressed there) would 404/500 once actually deployed despite working locally. This document does not duplicate the route-gating/config detail already covered in `README.md`/`ARCHITECTURE.md` (§10.3 cross-references them instead). No decision register entry — a developer-tooling addition, not a design decision affecting TAC-1–4 or the two consumer flows. |
 | 2.13 | 2026-08-21 | **Structural completeness pass against `iam-lld-user-profile v1.md`'s canonical template, on explicit request: §11 (Key Request Flows) was the one section still short of the template's "one sequence diagram per catalogued endpoint" convention (`iam-lld-user-profile v1.md` §8.8 diagrams all 18 of its endpoints without exception) — TAC-1 (the admin listing endpoint) was covered in §8.3's catalogue and §7.2.3's ownership table, but had no flow of its own anywhere in §11, unlike TAC-2/3/4.** New **§11.1 List flow (TAC-1)** closes that gap: a sequence diagram plus a call-out of a real, previously-undocumented subtlety in the endpoint's own behavior — TAC-1's query filters only `deleted_at IS NULL`, not the fuller TAE-3 predicate TAC-4 evaluates, so a time-expired-but-unrevoked grant still appears in a TAC-1 listing after TAC-4 has already started answering `has_access:false` for it. This is a documentation addition only — verified against `internal/adapter/outbound/postgres/repository.go`'s actual `List` query, not assumed — no behavior changed. Every existing §11 subsection shifted down one position to make room (Grant §11.1→**11.2**, Revoke §11.2→**11.3**, Authorization check §11.3→**11.4**, Tenant-lifecycle cleanup §11.4→**11.5**, Per-user-removal cleanup §11.5→**11.6**); every cross-reference into §11.x elsewhere in this document (the header table's Audience row, §4, §5.3, §8.4, §10.5, §12.2/§12.3, §14.2/§14.4, §17.2, §18.2/§18.4, §19, and **TAC-D10**'s own §23 entry) was updated to match. Per this document's established convention (v2.0's own precedent), earlier revision-history rows above are left untouched — they describe the section numbers that were current at the time each was written, not the numbers valid today. No decision register entry — a structural/documentation-completeness addition, not a design decision. |
 | 2.14 | 2026-08-21 | **§10.3 gains a direct link to `api/asyncapi.yaml`, matching `iam-lld-user-profile v1.md` §7.3's identical treatment of its own spec.** §10.3 previously discussed the spec's shape (two `receive` operations, zero `send`) without ever pointing the reader at the file itself. Added the same "canonical spec is referenced here, not reproduced" framing `iam-lld-user-profile v1.md` §7.3 uses for its own anti-duplication rationale, plus an identically-formatted blockquote link — `[api/asyncapi.yaml](../../api/asyncapi.yaml)`, path verified relative to this document's own location (`docs/lld/iam-lld-tender-acl-service.md`) and confirmed to resolve. No fact about the event contract changed — this is a navigation aid only, not a correction. |
+| 2.15 | 2026-08-22 | **§6's package tree checked directly against the current repository listing (`find`/`ls`, not memory) and corrected where it had drifted, on explicit request.** Five gaps found and fixed, none behavior-affecting: (1) `cmd/tender-acl/` was missing **`swagger_info.go`** — the global swag-annotation file `make swag -g swagger_info.go` reads for title/version/host/security-scheme metadata (per-handler `@` annotations stay next to their handlers, unchanged). (2) `internal/adapter/outbound/postgres/` listed only `migrations/` — added **`migrations_fs.go`**, a `//go:embed` of `migrations/*.sql` that exists for the identical "no on-disk source tree in the distroless image" reason `api/embed.go` does, and is exactly the kind of detail this document's own §6 history already cares about getting right. (3) `internal/adapter/outbound/membershipcheck/` named the `HTTPChecker` type but not its second file, **`traceparent.go`** (manual W3C traceparent propagation onto the one outbound call, so Core's spans link back correctly) — added. (4) **`docs/swagger/` was the only `docs/` entry shown**, omitting `docs/lld/` (this document itself) and `docs/architecture/mermaid/` (the diagram sources backing `ARCHITECTURE.md`) — both real, both already referenced elsewhere in this document and in `CLAUDE.md`'s own package-layout tree, which already listed all three; §6's tree simply hadn't been brought into line with it. Restructured to a `docs/` block matching `CLAUDE.md`'s tree. (5) **`deploy/helm/` was the only `deploy/` entry shown**, omitting `deploy/monitoring/` (SLO/alert rules, the HPA custom-metrics adapter rule — §14/§16.3 both already describe these files' *contents* without this section ever naming their location) and `deploy/iam/` (the reference IRSA policy, attached by platform Terraform, not by this repo). Restructured to a `deploy/` block with all three. Also added a **`scripts/`** entry (`init-localstack.sh`, `migrate-data-from-org-membership.sh` — the actual script backing §21 step 1 / `MIGRATION_RUNBOOK.md` Phase 2's export/replication tooling claim, `merge_coverage.py`, `patch-swagger-extensions.py`), a real top-level directory this section never mentioned at all. No decision register entry — every change here is the tree catching up to code/tooling that already existed; nothing was decided or added to the service itself. |
 
 ---
 
@@ -156,7 +157,11 @@ tender-acl/
 │       │                            membershipcheck.HTTPChecker, both SQS consumers, and the
 │       │                            HTTP router; self-migrates at startup
 │       ├── config.go            -- env-driven config, fails fast on missing required vars
-│       └── observability.go     -- pgcommon.Config.{Logger,Tracer} adapters (§14.3)
+│       ├── observability.go     -- pgcommon.Config.{Logger,Tracer} adapters (§14.3)
+│       └── swagger_info.go      -- global swag annotations (title/version/host/security schemes),
+│                                    read via `make swag -g swagger_info.go`; per-handler
+│                                    @-annotations live next to each handler under
+│                                    adapter/inbound/http/ instead, not duplicated here
 ├── internal/
 │   ├── core/
 │   │   ├── domain/              -- TenderACLEntry · TenderACLLevel · CachedAccess · domain.Error
@@ -168,19 +173,27 @@ tender-acl/
 │   │                                port.MembershipCheckClient.Exists, fail-closed — TAC-FAIL-1)
 │   └── adapter/
 │       ├── inbound/
-│       │   ├── http/            -- handler, router, DTOs — TAC-1/2/3 (public, role-gated),
-│       │   │                        TAC-4 (internal, mesh-only, never 404)
+│       │   ├── http/            -- handler, router, DTOs, health.go (/healthz, /readyz),
+│       │   │                        asyncapi.go (the §10.3 HTML viewer) — TAC-1/2/3 (public,
+│       │   │                        role-gated), TAC-4 (internal, mesh-only, never 404)
 │       │   └── consumer/        -- OffboardingConsumer + MemberRemovalConsumer + ProcessedEvents
 │       │                            — tenant-lifecycle-tenderacl-q (§10.1) and
 │       │                            member-removal-tenderacl-q (ADR-0007 Wave 3 Phase 3)
 │       └── outbound/
-│           ├── postgres/        -- TenderACLRepository implementation (pgx/pgcommon) + migrations/
+│           ├── postgres/        -- TenderACLRepository implementation (pgx/pgcommon), migrate.go
+│           │                        (migrate.Runner wiring at startup, §7.4), migrations_fs.go
+│           │                        (//go:embed's migrations/*.sql — same "no on-disk source tree
+│           │                        in the distroless image" rationale as api/embed.go below),
+│           │                        migrations/
 │           ├── valkey/          -- Cache implementation, tac: keyspace (§9)
-│           ├── membershipcheck/ -- HTTPChecker — calls Core's
-│           │                        GET /internal/tenants/:id/members/:user_id/exists (§7.6.2)
-│           │                        — built behind the port.MembershipCheckClient interface
-│           │                        specifically so the Wave 4 merge can repoint or delete it
-│           │                        cheaply (ADR-0007's explicit instruction)
+│           ├── membershipcheck/ -- HTTPChecker (http_client.go) — calls Core's
+│           │                        GET /internal/tenants/:id/members/:user_id/exists (§7.6.2);
+│           │                        traceparent.go propagates the W3C traceparent header onto
+│           │                        that one outbound call so Core's spans link back to this
+│           │                        service's originating span — built behind the
+│           │                        port.MembershipCheckClient interface specifically so the
+│           │                        Wave 4 merge can repoint or delete it cheaply (ADR-0007's
+│           │                        explicit instruction)
 │           └── metrics/         -- cross-cutting Prometheus/OTel instruments, imported by both
 │                                    inbound adapters (request counters + cascade counters)
 ├── api/
@@ -189,10 +202,25 @@ tender-acl/
 │                                     GET /asyncapi (§10.3) needs no file present at runtime — the
 │                                     Dockerfile's final stage copies only the compiled binary, not
 │                                     the source tree, into the distroless image
-├── docs/swagger/                 -- generated OpenAPI 2.0 spec (docs.go/swagger.json/swagger.yaml),
-│                                     via `make swag` from handler @-annotations, never hand-edited
-│                                     (§8) — there is no separate hand-maintained api/openapi.yaml
-├── deploy/helm/
+├── docs/
+│   ├── lld/                     -- this document (revision-history-tracked, table at the top)
+│   ├── swagger/                 -- generated OpenAPI 2.0 spec (docs.go/swagger.json/swagger.yaml),
+│   │                                via `make swag` from handler @-annotations, never hand-edited
+│   │                                (§8) — there is no separate hand-maintained api/openapi.yaml
+│   └── architecture/mermaid/    -- diagram sources backing ARCHITECTURE.md
+├── deploy/
+│   ├── helm/tender-acl/         -- Helm chart (Chart.yaml, values.yaml, templates/: deployment,
+│   │                                hpa, httproute/ingress, networkpolicy, pdb, prometheusrule,
+│   │                                secret, securitypolicy, service(account/monitor)) — §16.1
+│   ├── monitoring/               -- SLO recording rules, alert rules, the HPA custom-metrics
+│   │                                adapter rule (§14, §16.3)
+│   └── iam/                      -- reference AWS IAM policy (policy.json/policy.tf.example) for
+│                                     this service's IRSA role — attached by platform Terraform,
+│                                     not by anything in this repo
+├── scripts/                      -- init-localstack.sh (queue provisioning for `make docker-up`),
+│                                     migrate-data-from-org-membership.sh (MIGRATION_RUNBOOK.md
+│                                     Phase 2 / §21 step 1's export/replication tooling),
+│                                     merge_coverage.py, patch-swagger-extensions.py
 ├── test/{integration,e2e,rls,testutil}/
 ├── Dockerfile  docker-compose.yml  Makefile  go.mod  .golangci.yml  .go-arch-lint.yml
 ```
