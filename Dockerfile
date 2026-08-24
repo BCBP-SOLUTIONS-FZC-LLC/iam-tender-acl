@@ -69,7 +69,7 @@ RUN CGO_ENABLED=0 GOOS=linux \
 # (e.g. gcr.io/distroless/base-debian12 without the "-nonroot" cert bundle,
 # or a scratch image), CA certificates would need to be copied explicitly:
 #   COPY --from=builder /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/ca-certificates.crt
-FROM gcr.io/distroless/static-debian12:nonroot@sha256:1b7b9f0f0e0a1d2155f531db587cc48ec26aaf97ab64364225f5bf18a054e66a AS runtime
+FROM gcr.io/distroless/static-debian12:nonroot@sha256:afa5c872c891853ca7fcf1f12c3edb23f7eeef36189728842dd51042ff57f7ab AS runtime
 
 LABEL org.opencontainers.image.title="iam-tender-acl" \
       org.opencontainers.image.description="Tender ACL overlay service (tender_acl_entries) for the IAM stack — extracted from iam-org-membership per ADR-0007 Wave 3, interim pending Wave 4 merge into the Tender Service" \
