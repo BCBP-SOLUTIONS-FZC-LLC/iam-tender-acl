@@ -16,7 +16,7 @@
 # lag behind it. 1.26.6 additionally carries the go1.26.6 stdlib security
 # fixes (crypto/tls, net/http, encoding/xml, encoding/asn1, html/template,
 # net/url — see `make vuln-check`).
-FROM golang:1.26.6-bookworm@sha256:116d58cbd88c1297624acc6e967a060012422bacf9930927e23fb719189c6f36 AS builder
+FROM golang:1.27.0-bookworm@sha256:484ef6066fa69acb059fdfeda7ba2b8f7391f2ef6abc6f9b8411e669ebd56466 AS builder
 
 ARG BUILD_VERSION=dev
 ARG SOURCE_DATE_EPOCH
