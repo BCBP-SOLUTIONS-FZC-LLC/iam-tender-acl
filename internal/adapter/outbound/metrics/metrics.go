@@ -45,6 +45,7 @@ type Metrics struct {
 	cacheMissesTotal          *prometheus.CounterVec
 	cascadeTotal              *prometheus.CounterVec
 	memberRemovalCascadeTotal *prometheus.CounterVec
+	unexpectedEventTypeTotal  *prometheus.CounterVec
 }
 
 // NewMetrics builds and registers every tender_acl_* instrument. Call once
@@ -133,12 +134,28 @@ func NewMetrics(reg ...prometheus.Registerer) (*Metrics, error) {
 			},
 			[]string{"result"},
 		),
+		// Mirrors iam-org-membership's iam_unknown_event_acknowledged_total —
+		// both consumers ack-and-drop (never error/retry) any event_type they
+		// don't recognize, per their own doc comments; this is what makes
+		// that silent skip observable instead of invisible. A sustained
+		// nonzero rate means either a producer rename this service's own
+		// tenantMembershipsPurgedEventType/membershipRevokedEventType
+		// constants haven't caught up to (exactly what happened before those
+		// constants existed — see CHANGELOG.md) or genuine queue
+		// misconfiguration (wrong event routed to this queue).
+		unexpectedEventTypeTotal: prometheus.NewCounterVec(
+			prometheus.CounterOpts{
+				Name: "tender_acl_unexpected_event_type_total",
+				Help: "Events acknowledged and dropped because event_type didn't match what this queue's consumer expects, by queue and event_type.",
+			},
+			[]string{"queue", "event_type"},
+		),
 	}
 
 	for _, c := range []prometheus.Collector{
 		m.writesTotal,
 		m.grantChecksTotal, m.checkCallsTotal, m.cacheHitsTotal, m.cacheMissesTotal,
-		m.cascadeTotal, m.memberRemovalCascadeTotal,
+		m.cascadeTotal, m.memberRemovalCascadeTotal, m.unexpectedEventTypeTotal,
 	} {
 		if err := registerer.Register(c); err != nil {
 			return nil, err
@@ -193,4 +210,13 @@ func (m *Metrics) RecordCascade(_ context.Context, result string) {
 // main.go can pass a *Metrics directly to the member removal consumer.
 func (m *Metrics) RecordMemberRemovalCascade(_ context.Context, result string) {
 	m.memberRemovalCascadeTotal.WithLabelValues(result).Inc()
+}
+
+// RecordUnexpectedEventType implements both consumer.CascadeMetrics and
+// consumer.MemberRemovalMetrics' identical method of this name, so main.go
+// can pass the same *Metrics to both consumers. queue is the SQS queue name
+// (tenant-lifecycle-tenderacl-q / member-removal-tenderacl-q); eventType is
+// the envelope's raw, unrecognized Type value.
+func (m *Metrics) RecordUnexpectedEventType(_ context.Context, queue, eventType string) {
+	m.unexpectedEventTypeTotal.WithLabelValues(queue, eventType).Inc()
 }

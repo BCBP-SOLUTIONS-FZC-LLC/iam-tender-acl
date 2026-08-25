@@ -41,6 +41,7 @@ this service has ever shipped with in production (no migration/dual-write concer
 | `tender_acl_cache_hits_total` / `tender_acl_cache_misses_total` | `key` (fixed `tac:acl`) |
 | `tender_acl_tenant_offboarding_cascade_total` | `result` |
 | `tender_acl_member_removal_cascade_total` | `result` |
+| `tender_acl_unexpected_event_type_total` | `queue`, `event_type` — mirrors `iam-org-membership`'s `iam_unknown_event_acknowledged_total`; makes the "ignoring unexpected event type" WARN observable, not just logged |
 
 **Both SQS consumers' metrics are `platform-events`'s own** — `events_consumed_total{queue,
 event_type,status}`, `events_consume_duration_seconds{queue,event_type}`,
@@ -83,7 +84,9 @@ populate, cache read) are logged at `WARN`, never escalated to a caller-visible 
 
 "Tender ACL" Grafana folder: Requests & Writes; Grant-Time Membership Check; Tenant-Offboarding
 Cleanup (LLD §14.4). Alerts (LLD §14.5): `/readyz` failing >5min → SEV-2; TAC-4 error rate >10%/5min
-→ SEV-2; membershipcheck unreachable during TAC-2 sustained >15min → SEV-3; DLQ depth > 0 → SEV-3.
+→ SEV-2; membershipcheck unreachable during TAC-2 sustained >15min → SEV-3; DLQ depth > 0 → SEV-3;
+`tender_acl_unexpected_event_type_total` sustained nonzero >30min → ticket (forward-compat signal,
+not paged — `TenderAclUnexpectedEventType`, mirrors `iam-org-membership`'s `IAMUnknownEventType`).
 
 ## Configuration (env vars)
 

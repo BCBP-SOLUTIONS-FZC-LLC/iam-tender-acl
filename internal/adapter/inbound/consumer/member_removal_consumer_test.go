@@ -93,7 +93,8 @@ func TestMemberRemovalConsumer_Handle_WrongEventType_SkippedNoError(t *testing.T
 		t.Fatal("cascade must not run for an unexpected event type")
 		return 0, nil
 	}}
-	c := newTestMemberRemovalConsumer(repo, &fakeIdempotencyStore{}, &fakeCascadeMetrics{})
+	metrics := &fakeCascadeMetrics{}
+	c := newTestMemberRemovalConsumer(repo, &fakeIdempotencyStore{}, metrics)
 
 	env := events.Envelope[json.RawMessage]{
 		ID: uuid.New().String(), Type: "TenantOffboarded",
@@ -101,6 +102,8 @@ func TestMemberRemovalConsumer_Handle_WrongEventType_SkippedNoError(t *testing.T
 	}
 	handleErr := c.Handle(context.Background(), env)
 	require.NoError(t, handleErr)
+	assert.Equal(t, []string{"member-removal-tenderacl-q:TenantOffboarded"}, metrics.results,
+		"an unexpected event type must be observable as a metric, not just a log line")
 }
 
 func TestMemberRemovalConsumer_Handle_MissingEventID_ReturnsError(t *testing.T) {

@@ -128,7 +128,7 @@ spec:
           annotations:
             summary: iam-tender-acl tenant offboarding cascade is failing
             description: >-
-              One or more TenantOffboarded deliveries failed to complete the
+              One or more TenantMembershipsPurged deliveries failed to complete the
               cascade delete of tender_acl_entries. Since the idempotency
               record is only written after success, the message stays on
               tenant-lifecycle-tenderacl-q for redelivery — check consumer
@@ -149,7 +149,7 @@ spec:
             summary: tenant-lifecycle-tenderacl-q-dlq has messages
             description: >-
               {{ "{{ $value }}" }} message(s) on the dead-letter queue
-              (LLD §14.5 SEV-3). Each one is a TenantOffboarded delivery
+              (LLD §14.5 SEV-3). Each one is a TenantMembershipsPurged delivery
               that failed 5 consecutive processing attempts. Inspect the
               DLQ payloads and, once the underlying issue is fixed, redrive
               them back to tenant-lifecycle-tenderacl-q.
@@ -171,7 +171,7 @@ spec:
           annotations:
             summary: iam-tender-acl member removal ACL cascade is failing
             description: >-
-              One or more TenantMembershipRemoved deliveries failed to
+              One or more MembershipRevoked deliveries failed to
               complete the soft-delete of that user's tender_acl_entries
               rows. Since the idempotency record is only written after
               success, the message stays on member-removal-tenderacl-q for
@@ -189,8 +189,37 @@ spec:
             summary: member-removal-tenderacl-q-dlq has messages
             description: >-
               {{ "{{ $value }}" }} message(s) on the dead-letter queue.
-              Each one is a TenantMembershipRemoved delivery that failed 5
+              Each one is a MembershipRevoked delivery that failed 5
               consecutive processing attempts. Inspect the DLQ payloads
               and, once the underlying issue is fixed, redrive them back to
               member-removal-tenderacl-q.
+
+    # ── Forward-compat signal (ticket) — mirrors iam-org-membership's
+    #    identical IAMUnknownEventType alert ──────────────────────────────
+    - name: tender_acl_forward_compat
+      rules:
+        - alert: TenderAclUnexpectedEventType
+          # Both consumers ack-and-drop (never error/retry) any event_type
+          # they don't recognize — this alert is what makes a sustained
+          # rate of that actionable instead of a log line nobody's
+          # watching. Exactly the failure mode that let both cascades
+          # silently skip-and-ack every delivery for a real stretch of
+          # time before the event-type rename was caught (CHANGELOG.md).
+          expr: |
+            rate(tender_acl_unexpected_event_type_total{job={{ include "tender-acl.fullname" . | quote }}}[10m]) > 0
+          for: 30m
+          labels:
+            severity: ticket
+            team: platform
+          annotations:
+            summary: iam-tender-acl is acknowledging an event type it doesn't recognize
+            description: >-
+              {{ "{{ $labels.queue }}" }} is receiving event_type
+              "{{ "{{ $labels.event_type }}" }}", which doesn't match what
+              this consumer expects. Either iam-org-membership
+              renamed/added an event type this service's
+              tenantMembershipsPurgedEventType/membershipRevokedEventType
+              constants haven't caught up to, or the wrong event is routed
+              to this queue (SNS subscription filter-policy
+              misconfiguration).
 {{- end }}

@@ -62,6 +62,15 @@ func (f *fakeCascadeMetrics) RecordMemberRemovalCascade(_ context.Context, resul
 	f.results = append(f.results, result)
 }
 
+// RecordUnexpectedEventType satisfies both CascadeMetrics' and
+// MemberRemovalMetrics' identical method, same sharing rationale as
+// RecordMemberRemovalCascade above.
+func (f *fakeCascadeMetrics) RecordUnexpectedEventType(_ context.Context, queue, eventType string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.results = append(f.results, queue+":"+eventType)
+}
+
 func newTestConsumer(repo CascadeDeleter, idem IdempotencyStore, metrics CascadeMetrics) *OffboardingConsumer {
 	return NewOffboardingConsumer(repo, idem, metrics, port.SlogStyleLogger{}, otel.Tracer("test"))
 }
@@ -125,11 +134,14 @@ func TestConsumer_Handle_WrongEventType_SkippedNoError(t *testing.T) {
 		t.Fatal("cascade must not run for an unexpected event type")
 		return 0, nil
 	}}
-	c := newTestConsumer(repo, &fakeIdempotencyStore{}, &fakeCascadeMetrics{})
+	metrics := &fakeCascadeMetrics{}
+	c := newTestConsumer(repo, &fakeIdempotencyStore{}, metrics)
 
 	env := events.Envelope[json.RawMessage]{ID: uuid.New().String(), Type: "SomeOtherEvent", TenantID: uuid.New().String(), Timestamp: time.Now().UTC()}
 	handleErr := c.Handle(context.Background(), env)
 	require.NoError(t, handleErr)
+	assert.Equal(t, []string{"tenant-lifecycle-tenderacl-q:SomeOtherEvent"}, metrics.results,
+		"an unexpected event type must be observable as a metric, not just a log line")
 }
 
 func TestConsumer_Handle_MissingEventID_ReturnsError(t *testing.T) {

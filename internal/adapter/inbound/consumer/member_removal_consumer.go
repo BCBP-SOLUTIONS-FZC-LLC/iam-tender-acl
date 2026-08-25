@@ -28,6 +28,10 @@ type UserRemovalCascader interface {
 // into one series.
 type MemberRemovalMetrics interface {
 	RecordMemberRemovalCascade(ctx context.Context, result string)
+	// RecordUnexpectedEventType — see CascadeMetrics' identical method doc
+	// comment (offboarding_consumer.go); the exact same reasoning applies
+	// here, since this consumer had the exact same silent-skip history.
+	RecordUnexpectedEventType(ctx context.Context, queue, eventType string)
 }
 
 // membershipRevokedEventType was "TenantMembershipRemoved" until
@@ -39,6 +43,11 @@ type MemberRemovalMetrics interface {
 // MembershipRevoked delivery under the old name — it skip-and-acked every
 // one — so the per-user ACL cascade below was silently never firing.
 const membershipRevokedEventType = "MembershipRevoked"
+
+// memberRemovalQueueName is this consumer's queue, used only as the
+// RecordUnexpectedEventType metric label — the SQS queue URL itself isn't
+// available inside Handle.
+const memberRemovalQueueName = "member-removal-tenderacl-q"
 
 // MemberRemovalConsumer handles member-removal-tenderacl-q, replacing the
 // same-transaction SoftDeleteForUser call iam-org-membership's
@@ -68,6 +77,7 @@ func (c *MemberRemovalConsumer) Handle(ctx context.Context, env events.Envelope[
 	defer span.End()
 
 	if env.Type != "" && env.Type != membershipRevokedEventType {
+		c.metrics.RecordUnexpectedEventType(ctx, memberRemovalQueueName, env.Type)
 		c.logger.WarnContext(ctx, "ignoring unexpected event type on member-removal-tenderacl-q",
 			"event_type", env.Type,
 			"event_id", env.ID,

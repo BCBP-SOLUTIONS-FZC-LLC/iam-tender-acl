@@ -21,14 +21,14 @@
 #         here is a genuine repository/database failure.
 #
 #  SLO-3  Tenant offboarding cascade convergence
-#         Target: every TenantOffboarded delivery's cascade succeeds
+#         Target: every TenantMembershipsPurged delivery's cascade succeeds
 #         (result="success"); the idempotent retry design means a
 #         transient failure should self-heal within a few redeliveries,
 #         not accumulate. A delayed cascade is never a live authz risk
 #         (TAC-EVT-4) — this SLO is about operational hygiene, not security.
 #
 #  SLO-4  Per-user-removal ACL cascade convergence (ADR-0007 Wave 3 Phase 3)
-#         Target: every TenantMembershipRemoved delivery's cascade
+#         Target: every MembershipRevoked delivery's cascade
 #         succeeds (result="success") — same convergence/idempotency
 #         reasoning as SLO-3, tracked as an independent series since it's
 #         a different failure domain (separate queue/DLQ from tenant

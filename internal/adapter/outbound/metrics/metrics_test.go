@@ -97,3 +97,11 @@ func TestMetrics_RecordMemberRemovalCascade_DoesNotPanic(t *testing.T) {
 		m.RecordMemberRemovalCascade(context.Background(), "error")
 	})
 }
+
+func TestMetrics_RecordUnexpectedEventType_DoesNotPanic(t *testing.T) {
+	m := newTestMetrics(t)
+	assert.NotPanics(t, func() {
+		m.RecordUnexpectedEventType(context.Background(), "tenant-lifecycle-tenderacl-q", "SomeOtherEvent")
+		m.RecordUnexpectedEventType(context.Background(), "member-removal-tenderacl-q", "TenantOffboarded")
+	})
+}

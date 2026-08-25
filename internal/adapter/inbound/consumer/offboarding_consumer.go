@@ -32,6 +32,13 @@ type IdempotencyStore interface {
 // need to import that adapter package for the concrete type.
 type CascadeMetrics interface {
 	RecordCascade(ctx context.Context, result string)
+	// RecordUnexpectedEventType makes the "ignoring unexpected event type"
+	// WARN log below observable as a metric, not just a log line — this is
+	// exactly the failure mode that let both cascades silently skip-and-ack
+	// every delivery for a real stretch of time before the event-type
+	// rename was caught (see CHANGELOG.md). Mirrors iam-org-membership's
+	// iam_unknown_event_acknowledged_total.
+	RecordUnexpectedEventType(ctx context.Context, queue, eventType string)
 }
 
 // tenantMembershipsPurgedEventType was "TenantOffboarded" until
@@ -43,6 +50,11 @@ type CascadeMetrics interface {
 // relay, not RP's raw event, so this is a straight rename, not a new
 // producer.
 const tenantMembershipsPurgedEventType = "TenantMembershipsPurged"
+
+// tenantLifecycleQueueName is this consumer's queue, used only as the
+// RecordUnexpectedEventType metric label — the SQS queue URL itself isn't
+// available inside Handle.
+const tenantLifecycleQueueName = "tenant-lifecycle-tenderacl-q"
 
 // OffboardingConsumer handles tenant-lifecycle-tenderacl-q — this
 // service's ONLY event-driven behavior (LLD §10.1/§11.4), replacing the
@@ -74,6 +86,7 @@ func (c *OffboardingConsumer) Handle(ctx context.Context, env events.Envelope[js
 	defer span.End()
 
 	if env.Type != "" && env.Type != tenantMembershipsPurgedEventType {
+		c.metrics.RecordUnexpectedEventType(ctx, tenantLifecycleQueueName, env.Type)
 		c.logger.WarnContext(ctx, "ignoring unexpected event type on tenant-lifecycle-tenderacl-q",
 			"event_type", env.Type,
 			"event_id", env.ID,
