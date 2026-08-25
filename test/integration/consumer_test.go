@@ -23,7 +23,7 @@ func offboardedEnvelope(t *testing.T, eventID, tenantID uuid.UUID) events.Envelo
 	t.Helper()
 	return events.Envelope[json.RawMessage]{
 		ID:        eventID.String(),
-		Type:      "TenantOffboarded",
+		Type:      "TenantMembershipsPurged",
 		TenantID:  tenantID.String(),
 		Timestamp: time.Now().UTC(),
 	}
@@ -115,7 +115,7 @@ func memberRemovedEnvelope(t *testing.T, eventID, tenantID, userID uuid.UUID) ev
 	t.Helper()
 	return events.Envelope[json.RawMessage]{
 		ID:        eventID.String(),
-		Type:      "TenantMembershipRemoved",
+		Type:      "MembershipRevoked",
 		TenantID:  tenantID.String(),
 		Subject:   userID.String(),
 		Timestamp: time.Now().UTC(),

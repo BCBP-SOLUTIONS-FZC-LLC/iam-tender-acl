@@ -38,9 +38,17 @@ func (f *fakeIdempotencyStore) MarkProcessed(ctx context.Context, eventID uuid.U
 	return f.markProcessedFn(ctx, eventID)
 }
 
-type fakeCascadeMetrics struct{ results []string }
+// mu guards results: TestOffboarding_ConcurrentReplicas_Idempotent shares
+// one instance across concurrent goroutines to simulate two consumer
+// replicas racing on the same message.
+type fakeCascadeMetrics struct {
+	mu      sync.Mutex
+	results []string
+}
 
 func (f *fakeCascadeMetrics) RecordCascade(_ context.Context, result string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	f.results = append(f.results, result)
 }
 
@@ -49,6 +57,8 @@ func (f *fakeCascadeMetrics) RecordCascade(_ context.Context, result string) {
 // into the same results slice since no test needs to distinguish which
 // method was called, only the result values.
 func (f *fakeCascadeMetrics) RecordMemberRemovalCascade(_ context.Context, result string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	f.results = append(f.results, result)
 }
 
@@ -59,7 +69,7 @@ func newTestConsumer(repo CascadeDeleter, idem IdempotencyStore, metrics Cascade
 func offboardedEnvelope(eventID, tenantID uuid.UUID) events.Envelope[json.RawMessage] {
 	return events.Envelope[json.RawMessage]{
 		ID:        eventID.String(),
-		Type:      "TenantOffboarded",
+		Type:      "TenantMembershipsPurged",
 		TenantID:  tenantID.String(),
 		Timestamp: time.Now().UTC(),
 	}
@@ -125,7 +135,7 @@ func TestConsumer_Handle_WrongEventType_SkippedNoError(t *testing.T) {
 func TestConsumer_Handle_MissingEventID_ReturnsError(t *testing.T) {
 	c := newTestConsumer(&fakeCascadeDeleter{}, &fakeIdempotencyStore{}, &fakeCascadeMetrics{})
 
-	env := events.Envelope[json.RawMessage]{ID: "", Type: "TenantOffboarded", TenantID: uuid.New().String(), Timestamp: time.Now().UTC()}
+	env := events.Envelope[json.RawMessage]{ID: "", Type: "TenantMembershipsPurged", TenantID: uuid.New().String(), Timestamp: time.Now().UTC()}
 	handleErr := c.Handle(context.Background(), env)
 	assert.Error(t, handleErr)
 }
@@ -133,7 +143,7 @@ func TestConsumer_Handle_MissingEventID_ReturnsError(t *testing.T) {
 func TestConsumer_Handle_MissingTenantID_ReturnsError(t *testing.T) {
 	c := newTestConsumer(&fakeCascadeDeleter{}, &fakeIdempotencyStore{}, &fakeCascadeMetrics{})
 
-	env := events.Envelope[json.RawMessage]{ID: uuid.New().String(), Type: "TenantOffboarded", TenantID: "", Timestamp: time.Now().UTC()}
+	env := events.Envelope[json.RawMessage]{ID: uuid.New().String(), Type: "TenantMembershipsPurged", TenantID: "", Timestamp: time.Now().UTC()}
 	handleErr := c.Handle(context.Background(), env)
 	assert.Error(t, handleErr)
 }

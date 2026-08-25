@@ -6,13 +6,24 @@ info:
     Event contract for the Tender ACL Service.
 
     This service is **receive-only** on the event bus: it consumes exactly
-    two event types — `TenantOffboarded` and `TenantMembershipRemoved`
-    (ADR-0007 Wave 3 Phase 3, added after this document's original
-    version; see O_AND_M_DELTA.md §5 Option B) — and publishes **zero**
-    events (TAC-EVT-1, TAC-D5). There is no outbox table and no
-    SNS/EventBridge producer in this service — its entire event-driven
-    footprint is the two consumer operations defined below, each on its
-    own independent queue/DLQ pair.
+    two event types — `TenantMembershipsPurged` and `MembershipRevoked`
+    — and publishes **zero** events (TAC-EVT-1, TAC-D5). There is no
+    outbox table and no SNS/EventBridge producer in this service — its
+    entire event-driven footprint is the two consumer operations defined
+    below, each on its own independent queue/DLQ pair.
+
+    Both event types were renamed by `iam-org-membership` under ADR-0008:
+    the tenant-level cascade signal this service originally subscribed to
+    as `TenantOffboarded` (added ADR-0007 Wave 3 Phase 3) was renamed to
+    `TenantMembershipsPurged` specifically so it would stop colliding with
+    Realm Provisioner's own, differently-scoped `TenantOffboarded` event —
+    Core never re-emits RP's event, it only consumes it, and this queue's
+    contract was always meant to be Core's own relay. The per-user removal
+    signal originally added as `TenantMembershipRemoved` (also ADR-0007
+    Wave 3 Phase 3; see O_AND_M_DELTA.md §5 Option B) was consolidated into
+    a single event, `MembershipRevoked`, shared with the Delegation
+    Service's equivalent consumer. Both routes on `iam.membership.events`
+    (never `iam.tenant.events`) on the producer side.
 
     No ACL grant/revoke event exists in this service's event catalogue —
     this mirrors the source `iam-org-membership` behavior exactly (see
@@ -24,7 +35,7 @@ info:
 
     ## Consumer behavior
 
-    On receipt of a `TenantOffboarded` event, the service:
+    On receipt of a `TenantMembershipsPurged` event, the service:
 
       1. Deletes all rows scoped to the event's `tenant_id` from
          `tender_acl_entries` (LLD §7.6.4, §11.4 — replaces the
@@ -42,7 +53,7 @@ info:
     headers, and they can never reach TAC-4 regardless of whether their
     stale ACL rows have been cleaned up yet.
   x-consumer-behavior:
-    TenantOffboarded:
+    TenantMembershipsPurged:
       on_receipt:
         - "Delete all rows scoped to tenant_id from tender_acl_entries"
         - "Record event_id in processed_events (8-day retention) for idempotency/dedup"
@@ -51,7 +62,7 @@ info:
         The service never publishes any event, under any circumstance (no
         outbox, no SNS/EventBridge producer). No ACL grant/revoke event
         exists or is added by this extraction (TAC-EVT-1, TAC-D5).
-    TenantMembershipRemoved:
+    MembershipRevoked:
       on_receipt:
         - "Soft-delete (set deleted_at) rows scoped to (tenant_id, user_id) from tender_acl_entries"
         - "Record event_id in processed_events (8-day retention, consumer=member_removal) for idempotency/dedup"
@@ -61,7 +72,7 @@ info:
         the same-transaction SoftDeleteForUser call
         iam-org-membership's MembershipService.RemoveUser used to make
         before tender_acl_entries moved to its own database. Independent
-        queue/DLQ/processed_events-consumer-name from TenantOffboarded
+        queue/DLQ/processed_events-consumer-name from TenantMembershipsPurged
         above, so the two cascades' failure modes stay separately
         observable.
 
@@ -108,12 +119,12 @@ channels:
     description: >-
       Inbound-only channel over which this service receives tenant
       lifecycle events. Currently carries exactly one message type,
-      `TenantOffboarded`.
+      `TenantMembershipsPurged`.
     servers:
       - $ref: "#/servers/tenantLifecycleQueue"
     messages:
-      TenantOffboarded:
-        $ref: "#/components/messages/TenantOffboarded"
+      TenantMembershipsPurged:
+        $ref: "#/components/messages/TenantMembershipsPurged"
     bindings:
       sqs:
         queue:
@@ -130,12 +141,12 @@ channels:
     description: >-
       Inbound-only channel over which this service receives per-user-
       removal events. Carries exactly one message type,
-      `TenantMembershipRemoved`.
+      `MembershipRevoked`.
     servers:
       - $ref: "#/servers/memberRemovalQueue"
     messages:
-      TenantMembershipRemoved:
-        $ref: "#/components/messages/TenantMembershipRemoved"
+      MembershipRevoked:
+        $ref: "#/components/messages/MembershipRevoked"
     bindings:
       sqs:
         queue:
@@ -147,30 +158,30 @@ channels:
           retentionPeriodSeconds: 691200
 
 operations:
-  receiveTenantOffboarded:
+  receiveTenantMembershipsPurged:
     action: receive
     channel:
       $ref: "#/channels/tenant-lifecycle-tenderacl-q"
-    title: Receive TenantOffboarded
-    summary: Consume a TenantOffboarded event and cascade-delete the tenant's tender ACL entries.
+    title: Receive TenantMembershipsPurged
+    summary: Consume a TenantMembershipsPurged event and cascade-delete the tenant's tender ACL entries.
     description: >-
-      Receives a `TenantOffboarded` event from
+      Receives a `TenantMembershipsPurged` event from
       `tenant-lifecycle-tenderacl-q` and, if `event_id` has not already
       been recorded in `processed_events`, deletes every row scoped to the
       event's `tenant_id` from `tender_acl_entries`, then records the
       `event_id` in `processed_events` for idempotency. There are no
       `send` operations anywhere in this document (TAC-EVT-5).
     messages:
-      - $ref: "#/channels/tenant-lifecycle-tenderacl-q/messages/TenantOffboarded"
+      - $ref: "#/channels/tenant-lifecycle-tenderacl-q/messages/TenantMembershipsPurged"
 
-  receiveTenantMembershipRemoved:
+  receiveMembershipRevoked:
     action: receive
     channel:
       $ref: "#/channels/member-removal-tenderacl-q"
-    title: Receive TenantMembershipRemoved
-    summary: Consume a TenantMembershipRemoved event and soft-delete that user's tender ACL entries.
+    title: Receive MembershipRevoked
+    summary: Consume a MembershipRevoked event and soft-delete that user's tender ACL entries.
     description: >-
-      Receives a `TenantMembershipRemoved` event from
+      Receives a `MembershipRevoked` event from
       `member-removal-tenderacl-q` and, if `id` has not already been
       recorded in `processed_events` (under consumer name
       `member_removal`), soft-deletes every row scoped to the event's
@@ -179,7 +190,7 @@ operations:
       Phase 3). There are no `send` operations anywhere in this document
       (TAC-EVT-5).
     messages:
-      - $ref: "#/channels/member-removal-tenderacl-q/messages/TenantMembershipRemoved"
+      - $ref: "#/channels/member-removal-tenderacl-q/messages/MembershipRevoked"
 
 components:
   tags:
@@ -187,7 +198,7 @@ components:
       name: consumed
       description: >-
         This service is the consumer, not the producer, for every message
-        carrying this tag — both TenantOffboarded and TenantMembershipRemoved.
+        carrying this tag — both TenantMembershipsPurged and MembershipRevoked.
         Canonical schema ownership sits with the producing service
         (iam-org-membership) — these definitions are this service's
         consumer-side documentation, kept in sync with upstream, not the
@@ -203,25 +214,25 @@ components:
         exist as of this revision).
 
   messages:
-    TenantOffboarded:
-      name: TenantOffboarded
-      title: Tenant Offboarded
+    TenantMembershipsPurged:
+      name: TenantMembershipsPurged
+      title: Tenant Memberships Purged
       summary: A tenant has been offboarded and all of its data must be purged.
       tags:
         - $ref: "#/components/tags/consumed"
       contentType: application/json
       payload:
-        $ref: "#/components/schemas/TenantOffboardedPayload"
+        $ref: "#/components/schemas/TenantMembershipsPurgedPayload"
       examples:
-        - name: TenantOffboardedExample
-          summary: A typical TenantOffboarded event envelope.
+        - name: TenantMembershipsPurgedExample
+          summary: A typical TenantMembershipsPurged event envelope.
           payload:
             id: "d290f1ee-6c54-4b01-90e6-d701748f0851"
-            type: "TenantOffboarded"
+            type: "TenantMembershipsPurged"
             tenant_id: "a0f2a3c4-1111-4a2b-9c3d-000000000000"
             time: "2026-08-14T03:15:00Z"
       x-consumer-schema-dependency:
-        # This service is a pure CONSUMER of TenantOffboarded — it does not
+        # This service is a pure CONSUMER of TenantMembershipsPurged — it does not
         # own, version, or register this schema. There is no Glue Schema
         # Registry integration here (no platform-schemagov, no GlueCodec,
         # per LLD §10.4 — explicit, documented exemption): SQS delivers
@@ -231,44 +242,44 @@ components:
         # tooling that would otherwise catch a breaking upstream change.
         depends-on-shape:
           id: uuid
-          type: "TenantOffboarded (const)"
+          type: "TenantMembershipsPurged (const)"
           tenant_id: uuid
           time: date-time
         producer-lifecycle-status: unknown
         # We don't control the producer's x-lifecycle state and have no
         # automated visibility into it. If the producer ever deprecates
-        # TenantOffboarded in favor of a replacement event (e.g.
-        # TenantOffboarded.v2), this service needs a NEW consumer for that
+        # TenantMembershipsPurged in favor of a replacement event (e.g.
+        # TenantMembershipsPurged.v2), this service needs a NEW consumer for that
         # event type before the producer's retire-after deadline — see
         # ARCHITECTURE.md § Event consumer flow. Track any such notice as
         # a project memory / ticket the moment the producer team announces
         # it; there is no CI check that will surface it automatically.
 
-    TenantMembershipRemoved:
-      name: TenantMembershipRemoved
-      title: Tenant Membership Removed
+    MembershipRevoked:
+      name: MembershipRevoked
+      title: Membership Revoked
       summary: A user's tenant membership has been removed; their tender ACL entries in this tenant must be soft-deleted.
       tags:
         - $ref: "#/components/tags/consumed"
       contentType: application/json
       payload:
-        $ref: "#/components/schemas/TenantMembershipRemovedEnvelope"
+        $ref: "#/components/schemas/MembershipRevokedEnvelope"
       examples:
-        - name: TenantMembershipRemovedExample
-          summary: A typical TenantMembershipRemoved event envelope.
+        - name: MembershipRevokedExample
+          summary: A typical MembershipRevoked event envelope.
           payload:
             id: "e19a1c02-2222-4b3c-8d4e-000000000001"
-            type: "TenantMembershipRemoved"
+            type: "MembershipRevoked"
             tenant_id: "a0f2a3c4-1111-4a2b-9c3d-000000000000"
             subject: "9c8b7a6f-3333-4c5d-9e6f-000000000002"
             time: "2026-08-17T10:00:00Z"
       x-consumer-schema-dependency:
-        # Same posture as TenantOffboarded above: this service is a pure
+        # Same posture as TenantMembershipsPurged above: this service is a pure
         # CONSUMER, no Glue Schema Registry integration (LLD §10.4-style
         # exemption, extended to this new event by ADR-0007 Wave 3 Phase
         # 3). depends-on-shape reflects platform-events' actual
         # Envelope[T] wire fields (id/type/tenant_id/subject/time) —
-        # TenantOffboardedPayload above was originally written against a
+        # TenantMembershipsPurgedPayload above was originally written against a
         # nested event_id/event_type/occurred_at shape that predated this
         # document's confirmation of the real envelope against the
         # published platform-events library; both entries now use the
@@ -277,20 +288,20 @@ components:
         # reconciliation note).
         depends-on-shape:
           id: uuid
-          type: "TenantMembershipRemoved (const)"
+          type: "MembershipRevoked (const)"
           tenant_id: uuid
           subject: "uuid (the removed user's id)"
           time: date-time
         producer-lifecycle-status: unknown
 
   schemas:
-    TenantOffboardedPayload:
+    TenantMembershipsPurgedPayload:
       type: object
       description: >-
-        Payload of the TenantOffboarded event — this is platform-events'
+        Payload of the TenantMembershipsPurged event — this is platform-events'
         Envelope[T] wire shape directly (fields the producer/library
         define), not a service-specific data payload. Named "...Payload"
-        for historical reasons (this entry predates TenantMembershipRemoved's
+        for historical reasons (this entry predates MembershipRevoked's
         equivalent "...Envelope" naming); the shape below is the confirmed-
         correct top-level envelope, not a nested payload — see
         IMPLEMENTATION_GAP_ANALYSIS.md Discrepancy 6.
@@ -311,7 +322,7 @@ components:
           examples: ["d290f1ee-6c54-4b01-90e6-d701748f0851"]
         type:
           type: string
-          const: TenantOffboarded
+          const: TenantMembershipsPurged
           description: Discriminator identifying this event type.
         tenant_id:
           type: string
@@ -328,10 +339,10 @@ components:
           examples: ["2026-08-14T03:15:00Z"]
       additionalProperties: true
 
-    TenantMembershipRemovedEnvelope:
+    MembershipRevokedEnvelope:
       type: object
       description: >-
-        Payload of the TenantMembershipRemoved event — this is
+        Payload of the MembershipRevoked event — this is
         platform-events' Envelope[T] wire shape directly (fields the
         producer/library define), not a service-specific data payload
         (ADR-0007 Wave 3 Phase 3).
@@ -353,7 +364,7 @@ components:
           examples: ["e19a1c02-2222-4b3c-8d4e-000000000001"]
         type:
           type: string
-          const: TenantMembershipRemoved
+          const: MembershipRevoked
           description: Discriminator identifying this event type.
         tenant_id:
           type: string

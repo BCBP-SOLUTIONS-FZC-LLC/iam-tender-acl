@@ -16,11 +16,12 @@ import (
 func TestHTTPChecker_Exists_Active(t *testing.T) {
 	tenantID, userID, membershipID := uuid.New(), uuid.New(), uuid.New()
 	var gotPath string
-	var gotUserID, gotUserRoles string
+	var gotUserID, gotTenantID, gotTenantRoles string
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		gotPath = r.URL.Path
-		gotUserID = r.Header.Get("X-User-Id")
-		gotUserRoles = r.Header.Get("X-User-Roles")
+		gotUserID = r.Header.Get("x-user-id")
+		gotTenantID = r.Header.Get("x-tenant-id")
+		gotTenantRoles = r.Header.Get("x-tenant-roles")
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(map[string]any{"active": true, "tenant_membership_id": membershipID.String()})
 	}))
@@ -31,9 +32,10 @@ func TestHTTPChecker_Exists_Active(t *testing.T) {
 	require.NoError(t, err)
 	assert.True(t, active)
 	assert.Equal(t, membershipID, gotMembershipID)
-	assert.Equal(t, "/internal/tenants/"+tenantID.String()+"/members/"+userID.String()+"/exists", gotPath)
+	assert.Equal(t, "/api/v1/internal/tenants/"+tenantID.String()+"/members/"+userID.String()+"/exists", gotPath)
 	assert.Equal(t, "iam-system", gotUserID, "must authenticate as the reserved iam-system principal")
-	assert.Equal(t, "iam-system", gotUserRoles)
+	assert.Equal(t, tenantID.String(), gotTenantID, "iam-org-membership's ProtectedMiddlewares 401s without a well-formed x-tenant-id")
+	assert.Equal(t, "iam-system", gotTenantRoles, "iam-org-membership reads role membership from x-tenant-roles, not X-User-Roles")
 }
 
 // TestHTTPChecker_Exists_PropagatesTraceparent covers the fix linking this

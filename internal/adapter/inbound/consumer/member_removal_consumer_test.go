@@ -35,7 +35,7 @@ func newTestMemberRemovalConsumer(repo UserRemovalCascader, idem IdempotencyStor
 func memberRemovedEnvelope(eventID, tenantID, userID uuid.UUID) events.Envelope[json.RawMessage] {
 	return events.Envelope[json.RawMessage]{
 		ID:        eventID.String(),
-		Type:      "TenantMembershipRemoved",
+		Type:      "MembershipRevoked",
 		TenantID:  tenantID.String(),
 		Subject:   userID.String(),
 		Timestamp: time.Now().UTC(),
@@ -107,7 +107,7 @@ func TestMemberRemovalConsumer_Handle_MissingEventID_ReturnsError(t *testing.T) 
 	c := newTestMemberRemovalConsumer(&fakeUserRemovalCascader{}, &fakeIdempotencyStore{}, &fakeCascadeMetrics{})
 
 	env := events.Envelope[json.RawMessage]{
-		ID: "", Type: "TenantMembershipRemoved",
+		ID: "", Type: "MembershipRevoked",
 		TenantID: uuid.New().String(), Subject: uuid.New().String(), Timestamp: time.Now().UTC(),
 	}
 	handleErr := c.Handle(context.Background(), env)
@@ -118,7 +118,7 @@ func TestMemberRemovalConsumer_Handle_MissingTenantID_ReturnsError(t *testing.T)
 	c := newTestMemberRemovalConsumer(&fakeUserRemovalCascader{}, &fakeIdempotencyStore{}, &fakeCascadeMetrics{})
 
 	env := events.Envelope[json.RawMessage]{
-		ID: uuid.New().String(), Type: "TenantMembershipRemoved",
+		ID: uuid.New().String(), Type: "MembershipRevoked",
 		TenantID: "", Subject: uuid.New().String(), Timestamp: time.Now().UTC(),
 	}
 	handleErr := c.Handle(context.Background(), env)
@@ -129,7 +129,7 @@ func TestMemberRemovalConsumer_Handle_MissingSubject_ReturnsError(t *testing.T) 
 	c := newTestMemberRemovalConsumer(&fakeUserRemovalCascader{}, &fakeIdempotencyStore{}, &fakeCascadeMetrics{})
 
 	env := events.Envelope[json.RawMessage]{
-		ID: uuid.New().String(), Type: "TenantMembershipRemoved",
+		ID: uuid.New().String(), Type: "MembershipRevoked",
 		TenantID: uuid.New().String(), Subject: "", Timestamp: time.Now().UTC(),
 	}
 	handleErr := c.Handle(context.Background(), env)

@@ -1,14 +1,17 @@
 // Package consumer implements this service's event-driven behavior:
-// consuming TenantOffboarded from tenant-lifecycle-tenderacl-q (cascading
-// the deletion of that tenant's tender_acl_entries rows) and
-// TenantMembershipRemoved from member-removal-tenderacl-q (ADR-0007 Wave 3
-// Phase 3, O_AND_M_DELTA.md §5 Option B — soft-deleting one removed user's
-// rows, replacing the same-transaction SoftDeleteForUser call
-// iam-org-membership's RemoveUser used to make before this table moved to
-// its own database). This service publishes zero events (LLD §10.2/
-// TAC-EVT-1) — there is no outbox, no SNS producer, and no glue
-// registration anywhere in this codebase; these are inbound-only
-// subscriptions.
+// consuming TenantMembershipsPurged (formerly TenantOffboarded — renamed by
+// iam-org-membership under ADR-0008 to stop colliding with Realm
+// Provisioner's own, differently-scoped TenantOffboarded event) from
+// tenant-lifecycle-tenderacl-q (cascading the deletion of that tenant's
+// tender_acl_entries rows) and MembershipRevoked (formerly
+// TenantMembershipRemoved, consolidated by the same ADR-0008 pass) from
+// member-removal-tenderacl-q (ADR-0007 Wave 3 Phase 3, O_AND_M_DELTA.md §5
+// Option B — soft-deleting one removed user's rows, replacing the
+// same-transaction SoftDeleteForUser call iam-org-membership's RemoveUser
+// used to make before this table moved to its own database). This service
+// publishes zero events (LLD §10.2/TAC-EVT-1) — there is no outbox, no SNS
+// producer, and no glue registration anywhere in this codebase; these are
+// inbound-only subscriptions.
 package consumer
 
 import (

@@ -64,7 +64,7 @@ graph TD
     end
 
     subgraph mcadapter["internal/adapter/outbound/membershipcheck/  —  outbound HTTP client"]
-        mc_http["HTTPChecker — calls iam-org-membership's\nGET /internal/tenants/:id/members/:user_id/exists\n300ms client timeout · fails closed on any error"]
+        mc_http["HTTPChecker — calls iam-org-membership's\nGET /api/v1/internal/tenants/:id/members/:user_id/exists\n300ms client timeout · fails closed on any error"]
     end
 
     subgraph tests["Tests  —  test/"]
@@ -183,7 +183,7 @@ sequenceDiagram
 
     alt TAC-2 Grant
         H ->>+ MC: Exists(ctx, tenantID, userID)
-        MC ->>+ Core: GET /internal/tenants/:id/members/:user_id/exists
+        MC ->>+ Core: GET /api/v1/internal/tenants/:id/members/:user_id/exists
         Core -->>- MC: {"active": true|false, "tenant_membership_id"?}
         alt Core unreachable / timeout (300ms budget)
             MC -->>- H: error
@@ -399,7 +399,7 @@ sequenceDiagram
     TX ->>+ DB: fn(ctx, tx) — the actual SELECT/INSERT/UPDATE
     Note over DB: RLS POLICY USING/WITH CHECK<br/>(tenant_id = NULLIF(current_setting('app.tenant_id', true), '')::uuid)<br/>enforces tenant isolation at the DB layer — no cross-tenant<br/>leakage is possible even if application code omits a<br/>WHERE tenant_id = ? clause. TAC-4 runs this under the TARGET<br/>tenant's GUC, not the caller's — internal routes are not RLS-exempt.
 
-    Note over DB: Fail-closed on a missing/never-bound GUC: NULLIF(...,'') normalizes<br/>a never-set OR empty-string GUC to NULL, so tenant_id = NULL evaluates<br/>false — zero rows on read, every write rejected. Never an error, never<br/>a leak, even under PgBouncer transaction-pooling connection reuse<br/>(this hardening is already applied in this service's migration,<br/>0003_tender_acl_entries.up.sql — proven necessary by iam-group-mapping's<br/>TestRLS_NoGUCLeakageAcrossPooledConnection, which this service's own<br/>test/rls suite mirrors).
+    Note over DB: Fail-closed on a missing/never-bound GUC: NULLIF(...,'') normalizes<br/>a never-set OR empty-string GUC to NULL, so tenant_id = NULL evaluates<br/>false — zero rows on read, every write rejected. Never an error, never<br/>a leak, even under PgBouncer transaction-pooling connection reuse<br/>(this hardening is already applied in this service's migration,<br/>0001_tender_acl_schema.up.sql — proven necessary by iam-group-mapping's<br/>TestRLS_NoGUCLeakageAcrossPooledConnection, which this service's own<br/>test/rls suite mirrors).
 
     DB -->>- TX: rows / rows affected
     TX ->>+ DB: COMMIT (or ROLLBACK if fn returned an error)

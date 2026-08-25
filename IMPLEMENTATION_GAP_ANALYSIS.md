@@ -46,7 +46,7 @@ from TAC-1's `List`) before this ships to a caller that doesn't already do so.
 
 Affected files: `internal/adapter/outbound/postgres/repository.go` (`Revoke`),
 `internal/core/service/acl_service.go`, `internal/adapter/inbound/http/handler.go`/`dto.go`,
-`internal/adapter/outbound/postgres/migrations/0003_tender_acl_entries.up.sql`.
+`internal/adapter/outbound/postgres/migrations/0001_tender_acl_schema.up.sql`.
 
 ## Discrepancy 2 — Stale doc comment in O&M's source (found during research, independent of Discrepancy 1)
 
@@ -186,7 +186,7 @@ O&M's `tender_acl_entries` RLS policy today wraps `tenant_id` checks in a `rls_c
 violation-sampling table. This is a documented, intentional scope reduction (not a regression in
 tenant-isolation *enforcement*, only in *post-violation audit visibility*), confirmed present in
 both the LLD text and this build's actual migration
-(`internal/adapter/outbound/postgres/migrations/0003_tender_acl_entries.up.sql`).
+(`internal/adapter/outbound/postgres/migrations/0001_tender_acl_schema.up.sql`).
 
 ## Package layout — LLD-mandated flat structure overrode the original task brief, later reversed
 

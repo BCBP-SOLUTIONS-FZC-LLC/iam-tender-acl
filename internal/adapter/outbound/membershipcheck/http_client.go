@@ -26,7 +26,7 @@ const defaultTimeout = 300 * time.Millisecond
 
 // HTTPChecker implements port.MembershipCheckClient against
 // iam-org-membership's internal GET
-// /internal/tenants/{tenantID}/members/{userID}/exists endpoint.
+// /api/v1/internal/tenants/{tenantID}/members/{userID}/exists endpoint.
 type HTTPChecker struct {
 	baseURL    string
 	httpClient *http.Client
@@ -46,12 +46,16 @@ func NewHTTPChecker(baseURL string, httpClient *http.Client, timeout time.Durati
 	return &HTTPChecker{baseURL: strings.TrimRight(baseURL, "/"), httpClient: httpClient}
 }
 
-// setInternalHeaders authenticates as the reserved iam-system principal —
-// the same internal-call convention iam-group-mapping's catalogclient uses
-// against iam-catalog-admin's CAT-I1.
-func setInternalHeaders(req *http.Request) {
-	req.Header.Set("X-User-Id", "iam-system")
-	req.Header.Set("X-User-Roles", "iam-system")
+// setInternalHeaders authenticates as the reserved iam-system principal.
+// iam-org-membership's routes run behind platform-gincommon's
+// ProtectedMiddlewares, which requires a well-formed UUID in x-tenant-id
+// (not just x-user-id) and reads role membership from x-tenant-roles (not
+// X-User-Roles) — the previous X-User-Id/X-User-Roles-only pattern here
+// 401/403'd on every call.
+func setInternalHeaders(req *http.Request, tenantID uuid.UUID) {
+	req.Header.Set("x-user-id", "iam-system")
+	req.Header.Set("x-tenant-id", tenantID.String())
+	req.Header.Set("x-tenant-roles", "iam-system")
 }
 
 type existsResponse struct {
@@ -63,12 +67,12 @@ type existsResponse struct {
 // CLOSED: any network error, timeout, or non-2xx status is returned as an
 // error, never treated as "not active" and never defaulted to "active".
 func (c *HTTPChecker) Exists(ctx context.Context, tenantID, userID uuid.UUID) (bool, uuid.UUID, error) {
-	url := fmt.Sprintf("%s/internal/tenants/%s/members/%s/exists", c.baseURL, tenantID, userID)
+	url := fmt.Sprintf("%s/api/v1/internal/tenants/%s/members/%s/exists", c.baseURL, tenantID, userID)
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, http.NoBody)
 	if err != nil {
 		return false, uuid.UUID{}, fmt.Errorf("membershipcheck: build request: %w", err)
 	}
-	setInternalHeaders(req)
+	setInternalHeaders(req, tenantID)
 	propagateTraceparent(ctx, req)
 
 	resp, err := c.httpClient.Do(req)

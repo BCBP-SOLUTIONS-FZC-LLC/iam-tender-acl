@@ -1,1 +1,0 @@
-DROP FUNCTION IF EXISTS touch_row();

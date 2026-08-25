@@ -34,7 +34,15 @@ type CascadeMetrics interface {
 	RecordCascade(ctx context.Context, result string)
 }
 
-const tenantOffboardedEventType = "TenantOffboarded"
+// tenantMembershipsPurgedEventType was "TenantOffboarded" until
+// iam-org-membership renamed its tenant-level cascade relay to
+// "TenantMembershipsPurged" (ADR-0008) specifically so it would stop
+// colliding with Realm Provisioner's own, differently-scoped
+// TenantOffboarded event — Core never re-emits RP's event, it only
+// consumes it. This queue's contract was always meant to be Core's own
+// relay, not RP's raw event, so this is a straight rename, not a new
+// producer.
+const tenantMembershipsPurgedEventType = "TenantMembershipsPurged"
 
 // OffboardingConsumer handles tenant-lifecycle-tenderacl-q — this
 // service's ONLY event-driven behavior (LLD §10.1/§11.4), replacing the
@@ -65,7 +73,7 @@ func (c *OffboardingConsumer) Handle(ctx context.Context, env events.Envelope[js
 	ctx, span := c.tracer.Start(ctx, "OffboardingConsumer.Handle")
 	defer span.End()
 
-	if env.Type != "" && env.Type != tenantOffboardedEventType {
+	if env.Type != "" && env.Type != tenantMembershipsPurgedEventType {
 		c.logger.WarnContext(ctx, "ignoring unexpected event type on tenant-lifecycle-tenderacl-q",
 			slog.String("event_type", env.Type),
 			slog.String("event_id", env.ID),
@@ -92,7 +100,7 @@ func (c *OffboardingConsumer) Handle(ctx context.Context, env events.Envelope[js
 		return fmt.Errorf("offboardingconsumer: check idempotency for event %s: %w", eventID, err)
 	}
 	if processed {
-		logger.InfoContext(ctx, "duplicate TenantOffboarded delivery, skipping cascade")
+		logger.InfoContext(ctx, "duplicate TenantMembershipsPurged delivery, skipping cascade")
 		return nil
 	}
 

@@ -30,7 +30,15 @@ type MemberRemovalMetrics interface {
 	RecordMemberRemovalCascade(ctx context.Context, result string)
 }
 
-const tenantMembershipRemovedEventType = "TenantMembershipRemoved"
+// membershipRevokedEventType was "TenantMembershipRemoved" until
+// iam-org-membership's ADR-0008 decomposition consolidated that
+// tender-acl-specific event and the delegation-specific one it used to
+// emit separately into a single shared "MembershipRevoked" event (see
+// iam-org-membership's event_payloads.go doc comment on
+// MembershipRevokedPayload). This consumer never received a
+// MembershipRevoked delivery under the old name — it skip-and-acked every
+// one — so the per-user ACL cascade below was silently never firing.
+const membershipRevokedEventType = "MembershipRevoked"
 
 // MemberRemovalConsumer handles member-removal-tenderacl-q, replacing the
 // same-transaction SoftDeleteForUser call iam-org-membership's
@@ -60,7 +68,7 @@ func (c *MemberRemovalConsumer) Handle(ctx context.Context, env events.Envelope[
 	ctx, span := c.tracer.Start(ctx, "MemberRemovalConsumer.Handle")
 	defer span.End()
 
-	if env.Type != "" && env.Type != tenantMembershipRemovedEventType {
+	if env.Type != "" && env.Type != membershipRevokedEventType {
 		c.logger.WarnContext(ctx, "ignoring unexpected event type on member-removal-tenderacl-q",
 			slog.String("event_type", env.Type),
 			slog.String("event_id", env.ID),
@@ -95,7 +103,7 @@ func (c *MemberRemovalConsumer) Handle(ctx context.Context, env events.Envelope[
 		return fmt.Errorf("memberremovalconsumer: check idempotency for event %s: %w", eventID, err)
 	}
 	if processed {
-		logger.InfoContext(ctx, "duplicate TenantMembershipRemoved delivery, skipping cascade")
+		logger.InfoContext(ctx, "duplicate MembershipRevoked delivery, skipping cascade")
 		return nil
 	}
 

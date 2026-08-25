@@ -36,7 +36,7 @@ func TestParseAsyncSpec_InvalidYAML_ReturnsError(t *testing.T) {
 // TestParseAsyncSpec_RealEmbeddedSpec exercises the actual embedded
 // api/asyncapi.yaml (via loadAsyncSpec, which sync.Once-wraps this same
 // parse) end to end — this service is receive-only (TAC-EVT-1), so both
-// TenantOffboarded and TenantMembershipRemoved must come back tagged
+// TenantMembershipsPurged and MembershipRevoked must come back tagged
 // consumed, and there must be zero published messages.
 func TestLoadAsyncSpec_RealEmbeddedSpec_BothMessagesConsumed(t *testing.T) {
 	spec, err := loadAsyncSpec()
@@ -45,7 +45,7 @@ func TestLoadAsyncSpec_RealEmbeddedSpec_BothMessagesConsumed(t *testing.T) {
 
 	pub, con := splitMessagesByDirection(spec.Comps.Messages)
 	assert.Empty(t, pub, "this service publishes zero events (TAC-EVT-1)")
-	assert.ElementsMatch(t, []string{"TenantOffboarded", "TenantMembershipRemoved"}, con)
+	assert.ElementsMatch(t, []string{"TenantMembershipsPurged", "MembershipRevoked"}, con)
 }
 
 // ── asyncMessage.isConsumed / splitMessagesByDirection ────────────────────────
@@ -193,8 +193,8 @@ func TestAsyncAPIHandler_RealSpec_Returns200HTML(t *testing.T) {
 	assert.Equal(t, http.StatusOK, w.Code)
 	assert.Contains(t, w.Header().Get("Content-Type"), "text/html")
 	body := w.Body.String()
-	assert.Contains(t, body, "TenantOffboarded")
-	assert.Contains(t, body, "TenantMembershipRemoved")
+	assert.Contains(t, body, "TenantMembershipsPurged")
+	assert.Contains(t, body, "MembershipRevoked")
 	assert.NotContains(t, body, "Published Messages")
 }
 
@@ -206,7 +206,7 @@ func TestAsyncAPIYAMLHandler_ReturnsEmbeddedSpecVerbatim(t *testing.T) {
 	assert.Equal(t, http.StatusOK, w.Code)
 	assert.Contains(t, w.Header().Get("Content-Type"), "application/yaml")
 	assert.Contains(t, w.Body.String(), "asyncapi: 3.0.0")
-	assert.Contains(t, w.Body.String(), "TenantOffboarded")
+	assert.Contains(t, w.Body.String(), "TenantMembershipsPurged")
 }
 
 func TestEnvMiddleware_StashesEnvOnContext(t *testing.T) {
