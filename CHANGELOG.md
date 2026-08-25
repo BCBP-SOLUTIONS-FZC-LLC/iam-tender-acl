@@ -33,15 +33,13 @@ impact — they're noted for anyone integrating against it in dev.
   `iam-user-profile`, backed by a compile-time-embedded `api/asyncapi.yaml`.
 - `iam-org-membership`: `GET /internal/tenants/:id/members/:user_id/exists` — the provider endpoint
   `membershipcheck` depends on.
-- Full CI/CD, Helm chart, OpenAPI + AsyncAPI specs, and root documentation
-  (`O_AND_M_DELTA.md`, `MIGRATION_RUNBOOK.md`, `IMPLEMENTATION_GAP_ANALYSIS.md`,
-  `EVENT_COMPATIBILITY_REPORT.md`, `ARCHITECTURE.md`).
+- Full CI/CD, Helm chart, OpenAPI + AsyncAPI specs, and root documentation (`ARCHITECTURE.md`).
 - ADR-0007 Wave 3 Phases 4–7 (read/write cutover, cleanup, table drop) executed against
   `iam-org-membership`: its P-21/P-22/P-23/I-12 code path fully removed, `iam-authz-enrichment`
   repointed to call TAC-4 directly, and `tender_acl_entries`/`tender_acl_level` dropped from O&M's
   schema. This service is now the sole system of record for tender ACL data. "Tender Service" and
   "admin tooling" repointing remain not executable in this environment — see
-  `MIGRATION_RUNBOOK.md`/`IMPLEMENTATION_GAP_ANALYSIS.md` for what that means for completeness.
+  `tender-acl-service-lld.md` §21 for what that means for completeness.
 
 ### Changed
 
@@ -111,11 +109,9 @@ impact — they're noted for anyone integrating against it in dev.
 
 ### Known gaps
 
-See `IMPLEMENTATION_GAP_ANALYSIS.md` for full detail.
-
-- This service consumes two event types where the LLD originally specified one
-  (`EVENT_COMPATIBILITY_REPORT.md` has the reconciled invariant).
-- `TenantMembershipRemoved` hasn't been run through `iam-org-membership`'s
+- This service consumes two event types (`TenantMembershipsPurged`, `MembershipRevoked`) where the
+  LLD originally specified one.
+- `MembershipRevoked` hasn't been run through `iam-org-membership`'s
   `platform-schemagov` governance pipeline, and that repo's own `api/asyncapi.yaml` doesn't
   document it yet.
 - Nothing here has been deployed to, or soaked against, a real staging/production environment —

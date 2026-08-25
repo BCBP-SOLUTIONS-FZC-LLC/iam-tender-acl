@@ -55,7 +55,7 @@ workflow gates on this.
 
 | Symptom | Likely cause / fix |
 |---|---|
-| `503 core_unavailable` on every Grant | `CORE_INTERNAL_BASE_URL` unreachable or `iam-org-membership`'s internal exists-endpoint down/missing — check `O_AND_M_DELTA.md` for endpoint status. |
+| `503 core_unavailable` on every Grant | `CORE_INTERNAL_BASE_URL` unreachable or `iam-org-membership`'s internal exists-endpoint (`GET /internal/tenants/:id/members/:user_id/exists`) down/missing. |
 | `409 optimistic_lock_conflict` on Revoke | Caller's `record_version` is stale — re-fetch via TAC-1 and retry with the current value; this is by design, not a bug. |
 | `409 duplicate_grant` on Grant | An active (non-revoked) grant already exists for that `(tenant, tender, user)` — TAE-1's partial unique index is doing its job; revoke first if replacing it. |
 | TAC-4 returns stale `has_access` briefly after a Revoke | Expected — up to the time between commit and the cache `DEL` call, bounded by the 30s TTL as a hard ceiling. Not a bug unless it persists past 30s. |
@@ -96,5 +96,6 @@ workflow gates on this.
 
 ---
 Document reflects `iam-tender-acl` as of 2026-08-25 (ADR-0007 Wave 3: Phases 1–3, 6–7 executed;
-Phases 4–5 partially executed — see `MIGRATION_RUNBOOK.md` for what's real vs. not executable in
-this workspace. This service has never been deployed to a real staging/production environment.)
+Phases 4–5 partially executed — see `tender-acl-service-lld.md` §21 for what's real vs. not
+executable in this workspace. This service has never been deployed to a real staging/production
+environment.)

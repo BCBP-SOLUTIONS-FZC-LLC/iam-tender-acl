@@ -120,7 +120,7 @@ func NewMetrics(reg ...prometheus.Registerer) (*Metrics, error) {
 			},
 			[]string{"result"},
 		),
-		// ADR-0007 Wave 3 Phase 3 (O_AND_M_DELTA.md §5 Option B) — a separate
+		// ADR-0007 Wave 3 Phase 3 — a separate
 		// counter from cascadeTotal above, not a shared metric with an extra
 		// label: the tenant-offboarding and per-user-removal cascades are
 		// different failure domains (different queues, different DLQs,

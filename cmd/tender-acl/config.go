@@ -33,8 +33,8 @@ type config struct {
 	MembershipCheckTimeout time.Duration
 
 	// MemberRemovalQueueURL backs member-removal-tenderacl-q (ADR-0007 Wave
-	// 3 Phase 3, O_AND_M_DELTA.md §5 Option B) — the per-user-removal ACL
-	// cascade, separate from the tenant-offboarding cascade's queue. No
+	// 3 Phase 3) — the per-user-removal ACL cascade, separate from the
+	// tenant-offboarding cascade's queue. No
 	// field for that one here: SQS_QUEUE_URL and every other SQS_* tunable
 	// for it are loaded directly from platform-events/pkg/config.LoadSQS()
 	// in main.go instead of being duplicated into this struct — that

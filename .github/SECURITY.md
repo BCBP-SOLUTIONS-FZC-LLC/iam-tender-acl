@@ -6,7 +6,7 @@
 |---------|-----------|
 | 1.x     | ✅ Active |
 
-Older major versions are not patched. Deploy the latest 1.x image. This service is itself interim (ADR-0007 Option D — scheduled to merge into the Tender Service, see `MIGRATION_RUNBOOK.md` §Wave 4); "supported" means supported until that merge, not long-term.
+Older major versions are not patched. Deploy the latest 1.x image. This service is itself interim (ADR-0007 Option D — scheduled to merge into the Tender Service, see `tender-acl-service-lld.md` §22); "supported" means supported until that merge, not long-term.
 
 ## Reporting a Vulnerability
 
@@ -40,5 +40,5 @@ Areas of particular sensitivity in this service:
 - **GUC binding under connection pooling** — `app.tenant_id` is bound transaction-locally via `pgcommon.WithTenantTx` (`SELECT set_config('app.tenant_id', $1, true)`). An incorrect or leaked value under PgBouncer-style connection reuse would allow cross-tenant access; see `test/rls/` for the fail-closed and no-leak test cases this guards against.
 - **TAC-4 internal authorization-check endpoint** — `GET /internal/tenants/:id/tenders/:tender_id/acl/:user_id` is mesh-only mTLS with no JWT validation by design, and is on a **live authorization decision path** (Tender Service and AuthZ Enrichment call it to decide access). Any exposure of this route beyond the mesh, or any bug that returns `has_access:true` incorrectly, is a critical finding.
 - **Grant-time membership check (fail-closed)** — TAC-2 (grant) calls `iam-org-membership`'s `GET /internal/tenants/:id/members/:user_id/exists` synchronously before writing a new ACL entry. This client must **fail closed**: if the call errors or times out, the grant is blocked (`503 core_unavailable`), never defaulted to allow. A regression that flips this to fail-open would let ACLs be granted to non-members.
-- **Tenant offboarding cascade** — the `TenantOffboarded` consumer (`tenant-lifecycle-tenderacl-q`) deletes all of a tenant's ACL entries. An attacker able to forge or replay this event for an arbitrary `tenant_id` could destroy another tenant's ACL grants; idempotency (`processed_events`) is a correctness/dedup mechanism, not an authentication boundary — the authentication boundary is the SQS queue's IAM policy (see `deploy/iam/`).
-- **Optimistic-lock discrepancy on revoke** — see `IMPLEMENTATION_GAP_ANALYSIS.md`: the LLD describes a `record_version`-checked `409 optimistic_lock_conflict` on TAC-3, matching this implementation; historically the source `iam-org-membership` code this was extracted from had no such check. Do not silently reintroduce the source's weaker behavior.
+- **Tenant offboarding cascade** — the `TenantMembershipsPurged` consumer (`tenant-lifecycle-tenderacl-q`) deletes all of a tenant's ACL entries. An attacker able to forge or replay this event for an arbitrary `tenant_id` could destroy another tenant's ACL grants; idempotency (`processed_events`) is a correctness/dedup mechanism, not an authentication boundary — the authentication boundary is the SQS queue's IAM policy (see `deploy/iam/`).
+- **Optimistic-lock check on revoke** — TAC-3 gates its `record_version`-checked `409 optimistic_lock_conflict` per LLD §11.2/§12.1; historically the source `iam-org-membership` code this was extracted from had no such check. Do not silently reintroduce the source's weaker behavior.

@@ -9,7 +9,7 @@ assignees: ''
 ## Problem / motivation
 What problem does this solve? Which callers or use cases are affected (tender-admin UI, Tender Service, AuthZ Enrichment, the tenant-offboarding consumer)?
 
-Note: this service is explicitly interim (ADR-0007 Option D — scheduled to merge into the Tender Service, see `MIGRATION_RUNBOOK.md`). Prefer minimal, near-literal changes over new abstractions that would need unwinding at the Wave 4 merge (TAC-D1).
+Note: this service is explicitly interim (ADR-0007 Option D — scheduled to merge into the Tender Service, see `tender-acl-service-lld.md` §22). Prefer minimal, near-literal changes over new abstractions that would need unwinding at the Wave 4 merge (TAC-D1).
 
 ## Proposed solution
 Describe the API or behaviour change you'd like.

@@ -97,8 +97,7 @@ func (s *ACLService) Grant(
 		s.metrics.RecordGrantCheck(ctx, "not_active")
 		// Collapses iam-org-membership's today-distinct
 		// member_not_found(404)/member_not_active(422) into one code: the
-		// new provider contract only distinguishes active/not-active. See
-		// IMPLEMENTATION_GAP_ANALYSIS.md.
+		// new provider contract only distinguishes active/not-active.
 		return domain.TenderACLEntry{}, domain.NewError(domain.ErrCodeGranteeNotActiveMember, "grantee does not hold an active tenant membership")
 	}
 	s.metrics.RecordGrantCheck(ctx, "active")

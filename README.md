@@ -43,7 +43,7 @@ write volume.
 |---|---|---|---|
 | TAC-1 | `GET /api/v1/tenants/:id/tenders/:tender_id/acl` | `tender_admin`/`tenant_admin`/`tenant_owner` (via `x-tenant-roles`) | List active + inactive ACL entries for a tender. Not cached. |
 | TAC-2 | `POST /api/v1/tenants/:id/tenders/:tender_id/acl` | same | Grant access. Blocks on a synchronous membership-existence check against `iam-org-membership` — fails **closed** (`503 core_unavailable`) if that check can't be performed. |
-| TAC-3 | `DELETE /api/v1/tenants/:id/tenders/:tender_id/acl/:user_id` | same | Revoke (soft-delete). Requires `{"record_version": <int64>}` in the body; a mismatch returns `409 optimistic_lock_conflict` — see `IMPLEMENTATION_GAP_ANALYSIS.md`. Returns `204`. |
+| TAC-3 | `DELETE /api/v1/tenants/:id/tenders/:tender_id/acl/:user_id` | same | Revoke (soft-delete). Requires `{"record_version": <int64>}` in the body; a mismatch returns `409 optimistic_lock_conflict`. Returns `204`. |
 | TAC-4 | `GET /internal/tenants/:id/tenders/:tender_id/acl/:user_id` | mesh-only (mTLS), no role/JWT check | Never `404` — a missing grant is a valid, cacheable `has_access:false` answer. Cached 30s in Valkey. |
 
 Full request/response schemas: Swagger UI at `/swagger` (generated from handler annotations via
@@ -135,10 +135,7 @@ server and the SQS consumer in a single process (via `errgroup`) — no second b
 ## See also
 
 - [`ARCHITECTURE.md`](ARCHITECTURE.md) — package layout, request/event flows, cache/RLS design, key invariants.
-- [`O_AND_M_DELTA.md`](O_AND_M_DELTA.md) — what must change in `iam-org-membership` (not yet executed).
-- [`MIGRATION_RUNBOOK.md`](MIGRATION_RUNBOOK.md) — phased cutover plan.
-- [`IMPLEMENTATION_GAP_ANALYSIS.md`](IMPLEMENTATION_GAP_ANALYSIS.md) — LLD-vs-code discrepancies found during this build.
-- [`EVENT_COMPATIBILITY_REPORT.md`](EVENT_COMPATIBILITY_REPORT.md) — TAC-EVT-1..5 verification.
+- [`docs/lld/iam-lld-tender-acl-service.md`](docs/lld/iam-lld-tender-acl-service.md) §21 — phased cutover plan and execution status.
 
 ## Ownership
 

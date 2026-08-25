@@ -43,11 +43,10 @@ const membershipRevokedEventType = "MembershipRevoked"
 // MemberRemovalConsumer handles member-removal-tenderacl-q, replacing the
 // same-transaction SoftDeleteForUser call iam-org-membership's
 // MembershipService.RemoveUser used to make before tender_acl_entries
-// moved to its own database (LLD §10.1 only documents the *tenant*-
-// offboarding cascade — this is this repo's own addition for the
-// per-user-removal gap, tracked in IMPLEMENTATION_GAP_ANALYSIS.md). Its
-// Handle method matches platform-events' events.Handler function type,
-// exactly like OffboardingConsumer.
+// moved to its own database (LLD §10.1/§11.6, TAC-D10 — added after this
+// document's v2.0 to cover the per-user-removal gap the original LLD
+// didn't anticipate). Its Handle method matches platform-events'
+// events.Handler function type, exactly like OffboardingConsumer.
 type MemberRemovalConsumer struct {
 	repo        UserRemovalCascader
 	idempotency IdempotencyStore

@@ -67,8 +67,8 @@ env:
 
   # The one synchronous outbound dependency (LLD §6.3, §7.6.2): a
   # grant-time-only, fail-closed membership-existence check against
-  # iam-org-membership's new internal provider endpoint (see
-  # O_AND_M_DELTA.md). ≤50ms p99 expected latency; 300ms hard client
+  # iam-org-membership's internal provider endpoint. ≤50ms p99 expected
+  # latency; 300ms hard client
   # timeout (LLD §15) — these are deliberately different numbers, do not
   # conflate them.
   CORE_INTERNAL_BASE_URL: "http://org-membership.iam.svc.cluster.local"
@@ -83,7 +83,7 @@ env:
   SQS_QUEUE_URL: ""
   SQS_DLQ_URL: ""
   SQS_CONCURRENCY: "4"
-  # ADR-0007 Wave 3 Phase 3 (O_AND_M_DELTA.md §5 Option B) — the per-user-
+  # ADR-0007 Wave 3 Phase 3 — the per-user-
   # removal ACL cascade, a second/independent SQS subscription from the
   # tenant-offboarding one above (separate queue/DLQ, not a discriminated
   # payload on the same queue — see MemberRemovalConsumer's doc comment).

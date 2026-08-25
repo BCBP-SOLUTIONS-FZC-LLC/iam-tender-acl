@@ -109,8 +109,8 @@ func NewRouter(h *Handler, postgres PostgresHealth, cache Pinger, logger *slog.L
 	// TAC-4/I-12: mesh-only, mTLS trust boundary — no RBAC. Registered
 	// without an /api/v1 prefix, matching LLD §8.3's table and
 	// iam-org-membership's actual registration; §8.4's header text showing
-	// /api/v1/internal/... is the LLD's own internal inconsistency — see
-	// IMPLEMENTATION_GAP_ANALYSIS.md.
+	// /api/v1/internal/... was the LLD's own internal inconsistency,
+	// since corrected (LLD §8.4).
 	internalGroup := engine.Group("/internal/tenants/:id/tenders/:tender_id/acl")
 	internalGroup.GET("/:user_id", h.CheckAccess)
 

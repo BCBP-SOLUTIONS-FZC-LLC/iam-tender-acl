@@ -41,7 +41,7 @@ func parseUUIDParam(c *gin.Context, name string) (uuid.UUID, bool) {
 // and responds via its own generic denial path, which does not match
 // tender-acl-service-lld.md §20's single insufficient_role code for every
 // authz-boundary failure on these routes (tenant mismatch or role
-// mismatch alike). See IMPLEMENTATION_GAP_ANALYSIS.md.
+// mismatch alike).
 func requireSameTenant(c *gin.Context, tenantID uuid.UUID) bool {
 	rc, ok := RequestContextFromContext(c.Request.Context())
 	if !ok || rc.TenantID != tenantID.String() || !rc.HasAnyRole(requiredRoles...) {

@@ -295,7 +295,7 @@ func TestService_Grant_CheckerError_ReturnsCoreUnavailable(t *testing.T) {
 // TestService_Grant_GranteeNotActive_ReturnsGranteeNotActiveMember covers
 // the collapse of iam-org-membership's today-distinct member_not_found
 // (404) / member_not_active (422) into the new provider contract's single
-// active:false outcome — see IMPLEMENTATION_GAP_ANALYSIS.md.
+// active:false outcome.
 func TestService_Grant_GranteeNotActive_ReturnsGranteeNotActiveMember(t *testing.T) {
 	checker := &fakeChecker{existsFn: func(context.Context, uuid.UUID, uuid.UUID) (bool, uuid.UUID, error) {
 		return false, uuid.UUID{}, nil

@@ -200,7 +200,7 @@ sequenceDiagram
         end
     else TAC-3 Revoke
         H ->>+ DB: UPDATE ... SET deleted_at=now() WHERE ... AND deleted_at IS NULL<br/>AND record_version=$4 (WithTenantTx)
-        Note over DB: Caller must send its last-read record_version in the request<br/>body (LLD §11.3/§12.1). Zero rows affected (stale version, already<br/>revoked, or no such row) -> 409 optimistic_lock_conflict — see<br/>IMPLEMENTATION_GAP_ANALYSIS.md's Discrepancy 1 for this check's history.
+        Note over DB: Caller must send its last-read record_version in the request<br/>body (LLD §11.3/§12.1). Zero rows affected (stale version, already<br/>revoked, or no such row) -> 409 optimistic_lock_conflict.
         DB -->>- H: rows affected, or 409 optimistic_lock_conflict
         H ->> Cache: DEL tac:acl:{tenant}:{tender}:{user} (best-effort, post-commit)
         H -->> Client: 204
@@ -330,8 +330,7 @@ publish path. If a producer ever deprecates either event in favor of a replaceme
 needs a new consumer for it before the producer's retire-after deadline — track any such notice
 manually (there is no CI check that surfaces it).
 
-**Open governance gap** (not resolved by this task — see `IMPLEMENTATION_GAP_ANALYSIS.md`
-Discrepancy 7 / `EVENT_COMPATIBILITY_REPORT.md`'s "Governance gap" section): `MembershipRevoked`
+**Open governance gap** (not resolved by this task): `MembershipRevoked`
 has not been run through `iam-org-membership`'s `platform-schemagov` pipeline, and that repo's own
 `api/asyncapi.yaml` (its real schema source of truth) does not yet document the event. The event
 works correctly today — verified end-to-end against real Postgres in both repos' test suites — but
@@ -481,9 +480,9 @@ sequenceDiagram
 | TAC-D8 | No `rls_check_tenant()`/`rls_violation_log` forensic-logging wrapper — deliberate scope reduction, mirrors Wave-2's GM-D8. |
 | TAC-D9 | This v2.0 LLD revision adopts the canonical section template and repoints broken cross-references from earlier drafts; all requirement IDs preserved, only relocated. |
 
-**Event invariants (TAC-EVT-1–5)** and **operational/failure invariants (TAC-FAIL-1–3)**: see
-`EVENT_COMPATIBILITY_REPORT.md` and the Concurrency/Failure section above, respectively — both
-verified against the actually-built code, not just restated from the LLD.
+**Event invariants (TAC-EVT-1–6)** are described in full in `tender-acl-service-lld.md` §10.5;
+**operational/failure invariants (TAC-FAIL-1–3)** are covered in the Concurrency/Failure section
+above.
 
 ## Threat model (brief)
 
@@ -506,7 +505,7 @@ verified against the actually-built code, not just restated from the LLD.
 |---|---|
 | A reconcile algorithm (unlike `iam-group-mapping`'s full-replacement diff) | TAC-2/TAC-3 are simple single-row grant/revoke operations, not a bulk-replace resource. |
 | An outbound event publisher / outbox table | TAC-EVT-1/TAC-D5 — no ACL event exists in the platform's catalogue and this extraction adds none. |
-| A shared audit-log table | No such mechanism exists anywhere in this platform yet (see `IMPLEMENTATION_GAP_ANALYSIS.md`-style note in the sibling services' own gap analyses) — structured logging is the only durable write record today. |
+| A shared audit-log table | No such mechanism exists anywhere in this platform yet — structured logging is the only durable write record today. |
 | A GDPR per-user delete path | A departed user's row goes inert (unreachable via TAC-4 once membership lapses, TAC-D4), not deleted, unless the whole tenant offboards. |
 | `rls_check_tenant()`/`rls_violation_log` forensic logging | TAC-D8 — deliberately dropped, mirrors GM-D8. RLS enforcement itself is unaffected. |
 

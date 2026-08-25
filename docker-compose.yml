@@ -92,10 +92,10 @@ services:
       VALKEY_ADDR: valkey:6379
       VALKEY_PASSWORD: ""
       # The one synchronous outbound dependency (LLD §6.3, §7.6.2) — points
-      # at iam-org-membership's new internal provider endpoint
-      # (GET /internal/tenants/:id/members/:user_id/exists, see
-      # O_AND_M_DELTA.md). Not part of this compose stack; run
-      # iam-org-membership separately and point this at it, or a stub.
+      # at iam-org-membership's internal provider endpoint
+      # (GET /internal/tenants/:id/members/:user_id/exists). Not part of
+      # this compose stack; run iam-org-membership separately and point
+      # this at it, or a stub.
       CORE_INTERNAL_BASE_URL: http://host.docker.internal:8080
       MEMBERSHIP_CHECK_TIMEOUT_MS: "300"
       # LocalStack — container-internal port is always 4566 regardless of
@@ -109,7 +109,7 @@ services:
       # default of 1, to match this queue's prior CONSUMER_CONCURRENCY-driven
       # concurrency.
       SQS_CONCURRENCY: "4"
-      # ADR-0007 Wave 3 Phase 3 (O_AND_M_DELTA.md §5 Option B) — the
+      # ADR-0007 Wave 3 Phase 3 — the
       # per-user-removal ACL cascade, a second/independent subscription
       # from the tenant-offboarding one above. No platform-events/pkg/config
       # equivalent for this second queue, so its concurrency stays

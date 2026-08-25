@@ -5,8 +5,8 @@
 // tenant-lifecycle-tenderacl-q (cascading the deletion of that tenant's
 // tender_acl_entries rows) and MembershipRevoked (formerly
 // TenantMembershipRemoved, consolidated by the same ADR-0008 pass) from
-// member-removal-tenderacl-q (ADR-0007 Wave 3 Phase 3, O_AND_M_DELTA.md §5
-// Option B — soft-deleting one removed user's rows, replacing the
+// member-removal-tenderacl-q (ADR-0007 Wave 3 Phase 3 — soft-deleting one
+// removed user's rows, replacing the
 // same-transaction SoftDeleteForUser call iam-org-membership's RemoveUser
 // used to make before this table moved to its own database). This service
 // publishes zero events (LLD §10.2/TAC-EVT-1) — there is no outbox, no SNS

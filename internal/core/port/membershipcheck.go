@@ -17,13 +17,9 @@ import (
 // cheaply.
 //
 // When active is true, membershipID is the tenant_membership_id to store
-// as an audit-only reference on the granted row. Note: the LLD's literal
-// provider contract (§7.6.2) is `{"active": bool}` only; returning a bare
-// bool cannot populate tender_acl_entries.tenant_membership_id, which is
-// NOT NULL. This interface (and its HTTP adapter) assume the provider
-// response is extended with one more field — see O_AND_M_DELTA.md and
-// IMPLEMENTATION_GAP_ANALYSIS.md for why, and flag this for review before
-// the provider endpoint is actually implemented in iam-org-membership.
+// as an audit-only reference on the granted row. tender_acl_entries.
+// tenant_membership_id is NOT NULL, so the provider contract (LLD §7.6.2,
+// TAC-D11) returns it alongside active rather than a bare bool.
 //
 // err is non-nil only when the check itself could not be performed
 // (network error, timeout, non-2xx status) — never as a way of expressing

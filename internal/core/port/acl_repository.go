@@ -48,8 +48,8 @@ type TenderACLRepository interface {
 	CascadeDeleteForTenant(ctx context.Context, tenantID uuid.UUID) (deleted int64, err error)
 
 	// SoftDeleteForUser implements the per-user-removal ACL cascade
-	// (ADR-0007 Wave 3 Phase 3, O_AND_M_DELTA.md §5 Option B), replacing
-	// the same-transaction SoftDeleteForUser call iam-org-membership's
+	// (ADR-0007 Wave 3 Phase 3), replacing the same-transaction
+	// SoftDeleteForUser call iam-org-membership's
 	// MembershipService.RemoveUser used to make before this table moved to
 	// its own database. Unlike CascadeDeleteForTenant, this is a SOFT
 	// delete (sets deleted_at), mirroring both iam-org-membership's

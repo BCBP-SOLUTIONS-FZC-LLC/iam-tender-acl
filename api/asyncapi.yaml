@@ -20,7 +20,7 @@ info:
     Core never re-emits RP's event, it only consumes it, and this queue's
     contract was always meant to be Core's own relay. The per-user removal
     signal originally added as `TenantMembershipRemoved` (also ADR-0007
-    Wave 3 Phase 3; see O_AND_M_DELTA.md §5 Option B) was consolidated into
+    Wave 3 Phase 3) was consolidated into
     a single event, `MembershipRevoked`, shared with the Delegation
     Service's equivalent consumer. Both routes on `iam.membership.events`
     (never `iam.tenant.events`) on the producer side.
@@ -68,7 +68,7 @@ info:
         - "Record event_id in processed_events (8-day retention, consumer=member_removal) for idempotency/dedup"
       publishes_events: false
       note: >-
-        ADR-0007 Wave 3 Phase 3 (O_AND_M_DELTA.md §5 Option B) — replaces
+        ADR-0007 Wave 3 Phase 3 — replaces
         the same-transaction SoftDeleteForUser call
         iam-org-membership's MembershipService.RemoveUser used to make
         before tender_acl_entries moved to its own database. Independent
@@ -283,9 +283,7 @@ components:
         # nested event_id/event_type/occurred_at shape that predated this
         # document's confirmation of the real envelope against the
         # published platform-events library; both entries now use the
-        # confirmed-correct top-level shape (see
-        # IMPLEMENTATION_GAP_ANALYSIS.md Discrepancy 6 for that
-        # reconciliation note).
+        # confirmed-correct top-level shape.
         depends-on-shape:
           id: uuid
           type: "MembershipRevoked (const)"
@@ -303,8 +301,7 @@ components:
         define), not a service-specific data payload. Named "...Payload"
         for historical reasons (this entry predates MembershipRevoked's
         equivalent "...Envelope" naming); the shape below is the confirmed-
-        correct top-level envelope, not a nested payload — see
-        IMPLEMENTATION_GAP_ANALYSIS.md Discrepancy 6.
+        correct top-level envelope, not a nested payload.
       required:
         - id
         - type

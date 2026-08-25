@@ -36,7 +36,7 @@ not IAM. If you find yourself adding `sns:Publish`, `s3:*`, `glue:*`, or
 
 | Sid | AWS service | Actions | Purpose |
 |---|---|---|---|
-| `ConsumeTenantLifecycleQueue` | SQS | `ReceiveMessage`, `DeleteMessage`, `GetQueueAttributes`, `ChangeMessageVisibility` | Two SQS consumers: `tenant-lifecycle-tenderacl-q` (tenant offboarding cascade-delete) and `member-removal-tenderacl-q` (ADR-0007 Wave 3 Phase 3, O_AND_M_DELTA.md §5 Option B — per-user-removal ACL cascade). No `SendMessage` — the pod never publishes anywhere, including to either DLQ; redrive after `maxReceiveCount=5` is handled entirely by each queue's own redrive policy. |
+| `ConsumeTenantLifecycleQueue` | SQS | `ReceiveMessage`, `DeleteMessage`, `GetQueueAttributes`, `ChangeMessageVisibility` | Two SQS consumers: `tenant-lifecycle-tenderacl-q` (tenant offboarding cascade-delete) and `member-removal-tenderacl-q` (ADR-0007 Wave 3 Phase 3 — per-user-removal ACL cascade). No `SendMessage` — the pod never publishes anywhere, including to either DLQ; redrive after `maxReceiveCount=5` is handled entirely by each queue's own redrive policy. |
 | `CloudWatchLogs` | Logs | `CreateLogStream`, `PutLogEvents` | Container stdout when the OTel collector is not in the log pipeline. |
 
 ## Explicitly out of scope

@@ -254,8 +254,8 @@ func run() error {
 		return fmt.Errorf("build tenant-lifecycle-tenderacl-q consumer: %w", err)
 	}
 
-	// ADR-0007 Wave 3 Phase 3 (O_AND_M_DELTA.md §5 Option B): a second,
-	// independent SQS subscription for the per-user-removal ACL cascade —
+	// ADR-0007 Wave 3 Phase 3: a second, independent SQS subscription for
+	// the per-user-removal ACL cascade —
 	// deliberately a separate queue/consumer/DLQ from the tenant-
 	// offboarding one above, not a discriminated payload on the same
 	// queue, so each cascade's failure mode (and DLQ depth alert) stays

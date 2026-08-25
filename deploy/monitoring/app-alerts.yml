@@ -179,9 +179,9 @@ groups:
       - alert: TenderAclMemberRemovalCascadeFailing
         # Same reasoning as TenderAclOffboardingCascadeFailing: this
         # cascade is idempotent and safe to retry, and a delayed/failed
-        # cascade is never a live authz risk (O_AND_M_DELTA.md §5's own
-        # TAC-EVT-4-style framing — a removed user can't present valid
-        # gateway-injected headers again regardless).
+        # cascade is never a live authz risk (TAC-EVT-4-style framing — a
+        # removed user can't present valid gateway-injected headers again
+        # regardless).
         expr: increase(tender_acl_member_removal_cascade_total{job="tender-acl", result="error"}[30m]) > 0
         for: 5m
         labels:

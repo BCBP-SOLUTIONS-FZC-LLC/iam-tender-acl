@@ -147,6 +147,4 @@ Enforced via `make lint`'s `go-arch-lint check`.
 - [`flows-and-concurrency.md`](flows-and-concurrency.md) — request/event flows, optimistic locking, shutdown
 - [`operations.md`](operations.md) — observability, config, CI/CD, security
 - [`development-guide.md`](development-guide.md) — design decisions, troubleshooting, error codes
-- Repo root: `README.md`, `ARCHITECTURE.md`, `CHANGELOG.md`, `docs/lld/iam-lld-tender-acl-service.md`,
-  `O_AND_M_DELTA.md`, `MIGRATION_RUNBOOK.md`, `IMPLEMENTATION_GAP_ANALYSIS.md`,
-  `EVENT_COMPATIBILITY_REPORT.md`
+- Repo root: `README.md`, `ARCHITECTURE.md`, `CHANGELOG.md`, `docs/lld/iam-lld-tender-acl-service.md`

@@ -44,7 +44,7 @@ Provide a clear description of the changes.
 - [ ] New migrations have matching `.up.sql` and `.down.sql`
 - [ ] Down migration correctly reverses the up migration
 - [ ] RLS policies tested with `FORCE ROW LEVEL SECURITY` (`make test-rls`) — including the fail-closed (missing GUC) and no-leak-across-pooled-connection cases
-- [ ] TAC-2 (grant) and TAC-3 (revoke) writes remain single-row, transactional, and match the documented concurrency model (TAC-3's `record_version` optimistic-lock check; TAC-2 has none, per `IMPLEMENTATION_GAP_ANALYSIS.md`)
+- [ ] TAC-2 (grant) and TAC-3 (revoke) writes remain single-row, transactional, and match the documented concurrency model (TAC-3's `record_version` optimistic-lock check; TAC-2 has none — a fresh insert needs no version check)
 
 ### Security
 - [ ] No secrets or DSNs hardcoded
