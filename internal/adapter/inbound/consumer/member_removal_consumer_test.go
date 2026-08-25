@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"log/slog"
 	"testing"
 	"time"
 
@@ -13,6 +12,7 @@ import (
 	"github.com/stretchr/testify/require"
 	"go.opentelemetry.io/otel"
 
+	"github.com/BCBP-SOLUTIONS-FZC-LLC/iam-tender-acl/internal/core/port"
 	events "github.com/BCBP-SOLUTIONS-FZC-LLC/platform-events/pkg/events"
 )
 
@@ -25,7 +25,7 @@ func (f *fakeUserRemovalCascader) SoftDeleteForUser(ctx context.Context, tenantI
 }
 
 func newTestMemberRemovalConsumer(repo UserRemovalCascader, idem IdempotencyStore, metrics MemberRemovalMetrics) *MemberRemovalConsumer {
-	return NewMemberRemovalConsumer(repo, idem, metrics, slog.Default(), otel.Tracer("test"))
+	return NewMemberRemovalConsumer(repo, idem, metrics, port.SlogStyleLogger{}, otel.Tracer("test"))
 }
 
 // memberRemovedEnvelope mirrors iam-org-membership's actual emission

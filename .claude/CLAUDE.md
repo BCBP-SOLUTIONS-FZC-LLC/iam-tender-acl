@@ -131,6 +131,9 @@ Enforced via `make lint`'s `go-arch-lint check`.
   `domain.CodeOf`) matching the LLD's Appendix: Error Taxonomy verbatim.
 - `internal/adapter/outbound/postgres/repository.go` — `withTenant` → `pgcommon.WithValidatedGUCSet`;
   `wrapConnErr` classifies connectivity failures as `dependency_unavailable`.
+- `internal/adapter/outbound/postgres/db.go` — `DSNFromEnv`/`ApplyStatementTimeout`/
+  `MigrationDSNFromEnv`, the single DSN-assembly path for both pools and the migration runner,
+  matching `iam-user-profile`'s/`iam-org-membership`'s identical helpers.
 - `internal/adapter/inbound/http/router.go` — route registration incl. `registerDocsRoutes`
   (`/swagger/*any`, `/asyncapi`, `/asyncapi.yaml`), all gated by `DocsConfig`.
 - `internal/adapter/inbound/http/asyncapi.go` — server-rendered AsyncAPI HTML viewer, ported from

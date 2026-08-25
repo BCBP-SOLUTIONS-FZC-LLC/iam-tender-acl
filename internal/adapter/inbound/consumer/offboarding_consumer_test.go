@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"log/slog"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -15,6 +14,7 @@ import (
 	"github.com/stretchr/testify/require"
 	"go.opentelemetry.io/otel"
 
+	"github.com/BCBP-SOLUTIONS-FZC-LLC/iam-tender-acl/internal/core/port"
 	events "github.com/BCBP-SOLUTIONS-FZC-LLC/platform-events/pkg/events"
 )
 
@@ -63,7 +63,7 @@ func (f *fakeCascadeMetrics) RecordMemberRemovalCascade(_ context.Context, resul
 }
 
 func newTestConsumer(repo CascadeDeleter, idem IdempotencyStore, metrics CascadeMetrics) *OffboardingConsumer {
-	return NewOffboardingConsumer(repo, idem, metrics, slog.Default(), otel.Tracer("test"))
+	return NewOffboardingConsumer(repo, idem, metrics, port.SlogStyleLogger{}, otel.Tracer("test"))
 }
 
 func offboardedEnvelope(eventID, tenantID uuid.UUID) events.Envelope[json.RawMessage] {

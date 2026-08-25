@@ -8,10 +8,11 @@ graph TD
         domain["acl.go — TenderACLEntry · TenderACLLevel (view/edit/approve) · IsActive()\nCachedAccess (TAC-4 result / cache wire shape)\nerrors.go — Error, error codes"]
     end
 
-    subgraph portpkg["internal/core/port/  —  interfaces, no implementations"]
+    subgraph portpkg["internal/core/port/  —  interfaces (+ one real implementation)"]
         repoiface["acl_repository.go\nTenderACLRepository interface"]
         mciface["membershipcheck.go\nMembershipCheckClient interface"]
         cacheiface["cache.go\nCache interface"]
+        loggeriface["logger.go\nLogger interface + SlogStyleLogger\n(*slog.Logger-call-syntax wrapper over the\nshared Zap-backed sink, mirrors iam-org-membership)"]
     end
 
     subgraph servicepkg["internal/core/service/  —  business logic, depends only on domain+port"]
@@ -28,7 +29,7 @@ graph TD
     end
 
     subgraph pgadapter["internal/adapter/outbound/postgres/  —  persistence adapter"]
-        repo["repository.go — TenderACLRepository (pgx impl), incl. CascadeDeleteForTenant\nmigrations/ — schema, RLS, touch_row(), roles"]
+        repo["repository.go — TenderACLRepository (pgx impl), incl. CascadeDeleteForTenant\ndb.go — DSNFromEnv/ApplyStatementTimeout/MigrationDSNFromEnv\nlogger_adapter.go — port.Logger to pgcommon's domain.Logger\nmigrations/ — schema, RLS, touch_row(), roles"]
     end
 
     subgraph valkeyadapter["internal/adapter/outbound/valkey/  —  cache adapter"]

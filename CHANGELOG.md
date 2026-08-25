@@ -85,6 +85,34 @@ impact — they're noted for anyone integrating against it in dev.
 - Postgres migrations consolidated from five incremental files into one (`0001_tender_acl_schema`)
   expressing the schema's final shape — this service has never been deployed, so there's no prior
   release to preserve incremental migration history for.
+- **Logging switched from a local `log/slog` JSON handler to the same Zap-backed logger
+  `iam-user-profile`/`iam-org-membership` build via `platform-gincommon/pkg/logger.NewLogger`** —
+  the previous setup was already structurally correct (JSON, `trace_id`/`tenant_id` fields, routed
+  into gincommon/pgcommon/platform-events via three hand-rolled adapters) but was a second,
+  independent logging implementation and sink from every other current-generation sibling service.
+  New `internal/core/port/logger.go` (`Logger`, satisfied directly by the shared logger with no
+  adapter, plus `SlogStyleLogger` — preserves every existing call site's `*slog.Logger` syntax,
+  mirroring `iam-org-membership`'s identical type, extended with a `With` method for this service's
+  two consumers' per-event correlation-field binding) and
+  `internal/adapter/outbound/postgres/logger_adapter.go` (mirroring `iam-user-profile`'s identical
+  `postgres.LoggerAdapter` for pgcommon's Field-based `domain.Logger`). The three bespoke adapters
+  and the local JSON-handler constructor are gone. **`LOG_LEVEL` removed** (`.env.example`,
+  `docker-compose.yml`, Helm values) — neither sibling has it; the shared logger's only level
+  control is the dev/prod preset `ENVIRONMENT` already selects. No behavior change beyond that:
+  same structured JSON shape, same fields, same `WARN`-and-swallow posture for best-effort cache
+  failures.
+- **DSN resolution unified through a new `internal/adapter/outbound/postgres/db.go`
+  (`DSNFromEnv`/`ApplyStatementTimeout`/`MigrationDSNFromEnv`), matching `iam-user-profile`'s and
+  `iam-org-membership`'s identical helpers** — found during a database-layer audit prompted by the
+  logging one above: this service's main pool relied on `pgcommon.ConfigFromEnv()`'s own implicit
+  DSN, while the second (`processed_events`) pool explicitly set `DSN: cfg.DatabaseURL` (a bare
+  `os.Getenv`) — two DSN-resolution paths that happened to agree, plus no `PG_STATEMENT_TIMEOUT`
+  support at all (a hung query could hold a pool connection for the full request lifetime, unlike
+  both siblings). `cmd/tender-acl/config.go`'s `DatabaseURL`/`MigrationDatabaseURL` fields are now
+  populated by these helpers; `main.go` sets `pgCfg.DSN = cfg.DatabaseURL` explicitly, matching the
+  siblings' identical assignment. Every other pgcommon dimension audited in the same pass
+  (`wrapConnErr`, `withTenant`/GUC binding, `/readyz`'s `Pool.Health`, migrations,
+  `DrainAndClose`) was already correct — no change needed there.
 
 ### Fixed
 

@@ -59,9 +59,17 @@ CheckAccess/Grant/Revoke). Consumers get their own top-level spans
 
 ### Logging
 
-Structured `slog` JSON, carries `trace_id`/`tenant_id` on writes and cascade operations.
-Cache/DB best-effort failures (cache invalidation, cache populate, cache read) are logged at
-`WARN`, never escalated to a caller-visible error.
+A single Zap-backed logger, built once via `platform-gincommon/pkg/logger.NewLogger(cfg.Environment)`
+(`cmd/tender-acl/main.go`) — matching `iam-user-profile`'s and `iam-org-membership`'s identical
+convention, not a local slog JSON handler. Every log line in this process flows through it:
+`gincommon.Config.Logger` (HTTP request logs), `pgcommon.Config.Logger` (slow-query/migration logs,
+via `postgres.LoggerAdapter`), `platform-events`' SQS warnings, and the core service/consumer layers
+(via `internal/core/port.SlogStyleLogger`, a thin wrapper preserving the existing `*slog.Logger`-style
+call syntax — `Info(msg, "key", val, ...)`, `InfoContext(ctx, msg, ...)` — on top of the shared
+sink). `*Context` calls carry `trace_id` automatically when a span is present; both consumers'
+`Handle` methods additionally bind `tenant_id`/`event_id` (and `user_id` for member-removal) once
+per call via `SlogStyleLogger.With`. Cache/DB best-effort failures (cache invalidation, cache
+populate, cache read) are logged at `WARN`, never escalated to a caller-visible error.
 
 ### Health
 
@@ -90,6 +98,7 @@ Three have **no safe default** and must be set or the process fails fast at star
 | `MIGRATION_DATABASE_URL` | `tender_acl_migrator` (BYPASSRLS) startup-migration connection string | falls back to `DATABASE_URL` |
 | `DATABASE_MIGRATION_URL` | separate var read by the standalone `migrate-up`/`down`/`create` Make targets | same default value as above, distinct var |
 | `PG_MAX_CONNS` / `PG_MIN_CONNS` / `PG_SLOW_QUERY_THRESHOLD` | pool sizing (`pgcommon.ConfigFromEnv`) | `10` / `2` / `200ms` |
+| `PG_STATEMENT_TIMEOUT` | server-side `statement_timeout` appended to the DSN (`postgres.ApplyStatementTimeout`) so a hung query releases its pool connection instead of holding it for the full request lifetime — a Go duration (e.g. `5s`); only applied when the DSN is assembled from `PG_*` vars, not when `DATABASE_URL` is set directly | unset (no timeout) |
 | `VALKEY_ADDR` / `VALKEY_PASSWORD` | TAC-4's 30s cache | `localhost:6379` / — |
 | `CORE_INTERNAL_BASE_URL` | `iam-org-membership`'s internal base URL, consulted only at TAC-2 grant time | `http://org-membership.iam.svc.cluster.local` |
 | `MEMBERSHIP_CHECK_TIMEOUT_MS` | client-side timeout for the membership-existence call | `300` |
@@ -99,7 +108,7 @@ Three have **no safe default** and must be set or the process fails fast at star
 | `CONSUMER_CONCURRENCY` | queue #2's concurrency only — hand-rolled, not `platform-events/pkg/config` | `4` |
 | `AWS_REGION` / `AWS_ENDPOINT_URL` / `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` | LocalStack in dev; production uses IRSA and drops static creds | `us-east-1` / LocalStack URL / dummy |
 | `OTEL_EXPORTER_OTLP_ENDPOINT` | gRPC OTLP endpoint (bare `host:port`, no scheme) — via `platform-gincommon`'s `ObservabilityMiddlewares` | `localhost:4317` |
-| `LOG_LEVEL` / `ENVIRONMENT` / `APP_ENV` | logging/env badges | `debug` / `development` |
+| `ENVIRONMENT` | selects `platform-gincommon`'s Zap dev-console vs. prod-JSON encoder (`logger.NewLogger`, "dev"/"development"/"local" vs. everything else) and env/trace badges elsewhere | `development` |
 | `PROCESSED_EVENTS_CLEANUP_INTERVAL` | cleanup ticker cadence for the 8-day retention sweep | — |
 | `DOCS_ENABLED` | opt `/swagger` and `/asyncapi`/`/asyncapi.yaml` into production | `false` |
 | `DOCS_AUTH_TOKEN` | if set, requires `Authorization: Bearer <token>` on those routes in production | — |

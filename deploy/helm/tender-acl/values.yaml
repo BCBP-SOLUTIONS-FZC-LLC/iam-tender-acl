@@ -54,7 +54,6 @@ resources:
 # templates/deployment.yaml) — mirrors .env.example. Anything with a
 # credential (DATABASE_URL, VALKEY_PASSWORD) lives in envFromSecret below.
 env:
-  LOG_LEVEL: "info"
   ENVIRONMENT: "production"
   HTTP_PORT: "8080"
   METRICS_PORT: "9090"

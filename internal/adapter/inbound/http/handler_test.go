@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"strconv"
@@ -161,7 +160,7 @@ func (fakeMetrics) RecordCacheMiss(context.Context)             {}
 
 func newTestHandler(repo port.TenderACLRepository, checker port.MembershipCheckClient, c port.Cache, t *testing.T) *Handler {
 	t.Helper()
-	svc := service.NewACLService(repo, checker, c, fakeMetrics{}, slog.Default(), otel.Tracer("test"))
+	svc := service.NewACLService(repo, checker, c, fakeMetrics{}, port.SlogStyleLogger{}, otel.Tracer("test"))
 	return NewHandler(svc)
 }
 

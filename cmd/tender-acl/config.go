@@ -5,6 +5,8 @@ import (
 	"os"
 	"strconv"
 	"time"
+
+	aclpostgres "github.com/BCBP-SOLUTIONS-FZC-LLC/iam-tender-acl/internal/adapter/outbound/postgres"
 )
 
 // config holds every environment-variable-driven setting for this process.
@@ -17,11 +19,15 @@ type config struct {
 	MetricsPort string
 
 	// DatabaseURL is the tender_acl_app (RLS-bound, NOBYPASSRLS) connection
-	// string used by the runtime pool.
+	// string used by the runtime pool — aclpostgres.DSNFromEnv(), so DSN
+	// assembly and PG_STATEMENT_TIMEOUT application go through the same
+	// single implementation iam-user-profile/iam-org-membership use,
+	// instead of a second one hand-rolled here.
 	DatabaseURL string
 	// MigrationDatabaseURL is the tender_acl_migrator (BYPASSRLS)
 	// connection string used only for the startup migration run (LLD
-	// §7.4). Falls back to DatabaseURL for local dev.
+	// §7.4) — aclpostgres.MigrationDSNFromEnv(), which falls back to
+	// DSNFromEnv() for local dev.
 	MigrationDatabaseURL string
 
 	ValkeyAddr     string
@@ -48,7 +54,6 @@ type config struct {
 
 	OTELExporterOTLPEndpoint string
 
-	LogLevel    string
 	Environment string
 
 	ProcessedEventsCleanupInterval time.Duration
@@ -64,8 +69,8 @@ func loadConfig() (config, error) {
 	cfg := config{
 		HTTPPort:               getEnv("HTTP_PORT", "8080"),
 		MetricsPort:            getEnv("METRICS_PORT", "9090"),
-		DatabaseURL:            os.Getenv("DATABASE_URL"),
-		MigrationDatabaseURL:   getEnv("MIGRATION_DATABASE_URL", os.Getenv("DATABASE_URL")),
+		DatabaseURL:            aclpostgres.DSNFromEnv(),
+		MigrationDatabaseURL:   aclpostgres.MigrationDSNFromEnv(),
 		ValkeyAddr:             getEnv("VALKEY_ADDR", "localhost:6379"),
 		ValkeyPassword:         os.Getenv("VALKEY_PASSWORD"),
 		CoreInternalBaseURL:    getEnv("CORE_INTERNAL_BASE_URL", "http://org-membership.iam.svc.cluster.local"),
@@ -75,7 +80,6 @@ func loadConfig() (config, error) {
 
 		OTELExporterOTLPEndpoint: os.Getenv("OTEL_EXPORTER_OTLP_ENDPOINT"),
 
-		LogLevel:    getEnv("LOG_LEVEL", "info"),
 		Environment: getEnv("ENVIRONMENT", "production"),
 
 		ProcessedEventsCleanupInterval: time.Hour,

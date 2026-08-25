@@ -1,7 +1,6 @@
 package http
 
 import (
-	"log/slog"
 	"net/http"
 
 	"github.com/gin-gonic/gin"
@@ -9,6 +8,7 @@ import (
 	swaggerFiles "github.com/swaggo/files"
 	ginSwagger "github.com/swaggo/gin-swagger"
 
+	"github.com/BCBP-SOLUTIONS-FZC-LLC/iam-tender-acl/internal/core/port"
 	gincommon "github.com/BCBP-SOLUTIONS-FZC-LLC/platform-gincommon/pkg/gincommon"
 )
 
@@ -37,43 +37,20 @@ type Router struct {
 	engine *gin.Engine
 }
 
-// slogPlatformLogger adapts *slog.Logger to the map[string]interface{}-based
-// Logger interface both platform-gincommon's and platform-events' Config
-// structs expect (identical method shape in both libraries, structurally
-// satisfied here without importing either library's internal port package).
-type slogPlatformLogger struct{ l *slog.Logger }
-
-func (a slogPlatformLogger) Debug(msg string, fields map[string]interface{}) {
-	a.l.Debug(msg, mapToArgs(fields)...)
-}
-func (a slogPlatformLogger) Info(msg string, fields map[string]interface{}) {
-	a.l.Info(msg, mapToArgs(fields)...)
-}
-func (a slogPlatformLogger) Warn(msg string, fields map[string]interface{}) {
-	a.l.Warn(msg, mapToArgs(fields)...)
-}
-func (a slogPlatformLogger) Error(msg string, fields map[string]interface{}) {
-	a.l.Error(msg, mapToArgs(fields)...)
-}
-
-func mapToArgs(fields map[string]interface{}) []any {
-	args := make([]any, 0, len(fields)*2)
-	for k, v := range fields {
-		args = append(args, k, v)
-	}
-	return args
-}
-
 // NewRouter wires every route: the public admin API (TAC-1/2/3, role-gated
 // via RequestContext.Roles), the internal mTLS-only access-check API
 // (TAC-4, no RBAC — tenant isolation from RLS alone), and the health
 // checks.
-func NewRouter(h *Handler, postgres PostgresHealth, cache Pinger, logger *slog.Logger, tracing *gincommon.TracingOptions, docs DocsConfig) *Router {
+func NewRouter(h *Handler, postgres PostgresHealth, cache Pinger, logger port.Logger, tracing *gincommon.TracingOptions, docs DocsConfig) *Router {
 	gin.SetMode(gin.ReleaseMode)
 	engine := gin.New()
 
-	platformLogger := slogPlatformLogger{l: logger}
-	cfg := gincommon.Config{Logger: platformLogger, ServiceName: "tender-acl", Tracing: tracing}
+	// logger already matches gincommon's own port.Logger shape exactly
+	// (Debug/Info/Warn/Error(msg, map[string]any)) — it's the same
+	// Zap-backed logger built once via platform-gincommon's
+	// logger.NewLogger in cmd/tender-acl/main.go, so no adapter is needed
+	// here, unlike the *slog.Logger this used to wrap.
+	cfg := gincommon.Config{Logger: logger, ServiceName: "tender-acl", Tracing: tracing}
 	// Observability (recovery/request-id/tracing/metrics/correlation/logging)
 	// applies to every route, including TAC-4. Auth (ProtectedMiddlewares)
 	// applies only to the public admin group below — TAC-4 is a mesh-only

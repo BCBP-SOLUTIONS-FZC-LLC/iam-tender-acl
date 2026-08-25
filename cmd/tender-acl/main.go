@@ -4,15 +4,14 @@
 // grant/revoke/list surface (TAC-1/2/3) and the internal service-to-service
 // access check (TAC-4/I-12), enforces a grant-time-only membership check
 // against iam-org-membership in place of the composite FK this table lost,
-// and consumes TenantOffboarded to cascade-delete an offboarded tenant's
-// rows. It publishes zero events.
+// and consumes TenantMembershipsPurged to cascade-delete an offboarded
+// tenant's rows. It publishes zero events.
 package main
 
 import (
 	"context"
 	"errors"
 	"fmt"
-	"log/slog"
 	"net/http"
 	"os"
 	"os/signal"
@@ -30,10 +29,12 @@ import (
 	"github.com/BCBP-SOLUTIONS-FZC-LLC/iam-tender-acl/internal/adapter/outbound/metrics"
 	aclpostgres "github.com/BCBP-SOLUTIONS-FZC-LLC/iam-tender-acl/internal/adapter/outbound/postgres"
 	"github.com/BCBP-SOLUTIONS-FZC-LLC/iam-tender-acl/internal/adapter/outbound/valkey"
+	"github.com/BCBP-SOLUTIONS-FZC-LLC/iam-tender-acl/internal/core/port"
 	"github.com/BCBP-SOLUTIONS-FZC-LLC/iam-tender-acl/internal/core/service"
 	eventsconfig "github.com/BCBP-SOLUTIONS-FZC-LLC/platform-events/pkg/config"
 	events "github.com/BCBP-SOLUTIONS-FZC-LLC/platform-events/pkg/events"
 	gincommon "github.com/BCBP-SOLUTIONS-FZC-LLC/platform-gincommon/pkg/gincommon"
+	"github.com/BCBP-SOLUTIONS-FZC-LLC/platform-gincommon/pkg/logger"
 	pgcommon "github.com/BCBP-SOLUTIONS-FZC-LLC/platform-pgcommon/pkg/pgcommon"
 )
 
@@ -42,7 +43,7 @@ var buildVersion = "dev"
 
 func main() {
 	if err := run(); err != nil {
-		slog.Error("tender-acl exited with error", slog.String("error", err.Error()))
+		fmt.Fprintf(os.Stderr, "tender-acl exited with error: %v\n", err)
 		os.Exit(1)
 	}
 }
@@ -53,9 +54,20 @@ func run() error {
 		return fmt.Errorf("load config: %w", err)
 	}
 
-	logger := newLogger(cfg)
-	slog.SetDefault(logger)
-	mapLogger := slogMapLogger{l: logger}
+	// log is the single Zap-backed sink every log line in this process
+	// flows through — HTTP/consumer middleware (via gincommon.Config.Logger
+	// below), pgcommon's slow-query/migration logging (via
+	// aclpostgres.LoggerAdapter), platform-events' SQS warnings, and the
+	// core service/consumer layers (via port.SlogStyleLogger) — matching
+	// iam-user-profile's and iam-org-membership's identical
+	// logger.NewLogger(cfg.Environment) convention. No local JSON handler
+	// or slog.SetDefault: nothing in this process reaches for package-level
+	// slog anymore.
+	log, err := logger.NewLogger(cfg.Environment)
+	if err != nil {
+		return fmt.Errorf("init logger: %w", err)
+	}
+	svcLog := port.NewSlogStyleLogger(log)
 
 	// SQS_QUEUE_URL and every other tenant-lifecycle-tenderacl-q tunable
 	// (SQS_MAX_MESSAGES/SQS_WAIT_SECONDS/SQS_VISIBILITY_TIMEOUT/
@@ -69,7 +81,7 @@ func run() error {
 	if validateErr := sqsEnv.Validate(); validateErr != nil {
 		return fmt.Errorf("load SQS config: %w", validateErr)
 	}
-	eventsconfig.LogWarningsTo(mapLogger, sqsEnv.Warnings)
+	eventsconfig.LogWarningsTo(log, sqsEnv.Warnings)
 
 	baseCtx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
@@ -94,18 +106,23 @@ func run() error {
 	tracer := otel.Tracer("tender-acl")
 	defer func() {
 		if shutdownErr := gincommon.Shutdown(nil); shutdownErr != nil {
-			logger.Error("telemetry shutdown failed", slog.String("error", shutdownErr.Error()))
+			log.Error("telemetry shutdown failed", map[string]any{"error": shutdownErr.Error()})
 		}
 	}()
 
-	if err = aclpostgres.RunMigrations(baseCtx, cfg.MigrationDatabaseURL, slogDomainLogger{l: logger}); err != nil {
+	if err = aclpostgres.RunMigrations(baseCtx, cfg.MigrationDatabaseURL, aclpostgres.NewLoggerAdapter(log)); err != nil {
 		return fmt.Errorf("run migrations: %w", err)
 	}
 
 	pgCfg, pgWarnings := pgcommon.ConfigFromEnv()
 	for _, w := range pgWarnings {
-		logger.Warn("postgres config warning", slog.String("key", w.Key), slog.String("reason", w.Reason))
+		log.Warn("postgres config warning", map[string]any{"key": w.Key, "reason": w.Reason})
 	}
+	// cfg.DatabaseURL (aclpostgres.DSNFromEnv(), set in loadConfig) rather
+	// than ConfigFromEnv's own pgCfg.DSN directly: DSNFromEnv additionally
+	// applies PG_STATEMENT_TIMEOUT, matching iam-user-profile's/
+	// iam-org-membership's identical pgCfg.DSN = dsn assignment.
+	pgCfg.DSN = cfg.DatabaseURL
 	// GUCProvider: app.tenant_id is injected as a transaction-local GUC on
 	// every pgcommon.RunInTx call (see
 	// internal/adapter/outbound/postgres.withTenant), never session-scoped.
@@ -116,7 +133,7 @@ func run() error {
 	// the no-GUC-leakage-across-pooled-connection test); this is not a
 	// tunable, so it isn't left to configuration to get right.
 	pgCfg.PGBouncerMode = true
-	pgCfg.Logger = slogDomainLogger{l: logger}
+	pgCfg.Logger = aclpostgres.NewLoggerAdapter(log)
 	pgCfg.Tracer = otelSpanTracer{tracer: tracer}
 	pgPool, err := pgcommon.NewPool(baseCtx, pgCfg)
 	if err != nil {
@@ -136,7 +153,7 @@ func run() error {
 		drainCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
 		if drainErr := pgPool.DrainAndClose(drainCtx); drainErr != nil {
-			logger.Error("postgres pool drain failed", slog.String("error", drainErr.Error()))
+			log.Error("postgres pool drain failed", map[string]any{"error": drainErr.Error()})
 		}
 	}()
 
@@ -152,7 +169,7 @@ func run() error {
 	rawPoolCfg := pgcommon.Config{
 		DSN:           cfg.DatabaseURL,
 		PGBouncerMode: pgCfg.PGBouncerMode,
-		Logger:        slogDomainLogger{l: logger},
+		Logger:        aclpostgres.NewLoggerAdapter(log),
 		Tracer:        otelSpanTracer{tracer: tracer},
 	}
 	rawPool, err := pgcommon.NewPool(baseCtx, rawPoolCfg)
@@ -166,14 +183,14 @@ func run() error {
 		drainCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
 		if drainErr := rawPool.DrainAndClose(drainCtx); drainErr != nil {
-			logger.Error("raw postgres pool drain failed", slog.String("error", drainErr.Error()))
+			log.Error("raw postgres pool drain failed", map[string]any{"error": drainErr.Error()})
 		}
 	}()
 
 	valkeyClient := valkey.NewClient(valkey.ClientConfig{Addr: cfg.ValkeyAddr, Password: cfg.ValkeyPassword})
 	defer func() {
 		if closeErr := valkeyClient.Close(); closeErr != nil {
-			logger.Error("valkey client close failed", slog.String("error", closeErr.Error()))
+			log.Error("valkey client close failed", map[string]any{"error": closeErr.Error()})
 		}
 	}()
 	aclCache := valkey.NewCache(valkeyClient)
@@ -212,14 +229,14 @@ func run() error {
 	offboardingProcessedEvents := consumer.NewProcessedEvents(rawPool, "tenant_lifecycle_cleanup")
 	memberRemovalProcessedEvents := consumer.NewProcessedEvents(rawPool, "member_removal")
 
-	svc := service.NewACLService(repo, checker, aclCache, svcMetrics, logger, tracer)
+	svc := service.NewACLService(repo, checker, aclCache, svcMetrics, svcLog, tracer)
 	handler := httpadapter.NewHandler(svc)
 	docs := httpadapter.DocsConfig{
 		Environment: cfg.Environment,
 		Enabled:     cfg.DocsEnabled,
 		AuthToken:   cfg.DocsAuthToken,
 	}
-	router := httpadapter.NewRouter(handler, pgPool, aclCache, logger, tracing, docs)
+	router := httpadapter.NewRouter(handler, pgPool, aclCache, log, tracing, docs)
 
 	httpServer := &http.Server{
 		Addr:              ":" + cfg.HTTPPort,
@@ -235,9 +252,9 @@ func run() error {
 		ReadHeaderTimeout: 5 * time.Second,
 	}
 
-	offboardingConsumer := consumer.NewOffboardingConsumer(repo, offboardingProcessedEvents, svcMetrics, logger, tracer)
+	offboardingConsumer := consumer.NewOffboardingConsumer(repo, offboardingProcessedEvents, svcMetrics, svcLog, tracer)
 	eventsConsumer, err := events.NewSQSConsumer(
-		eventsconfig.SQSConfigFromEnv(sqsEnv, mapLogger),
+		eventsconfig.SQSConfigFromEnv(sqsEnv, log),
 		offboardingConsumer.Handle,
 		// SQSConsumerOptions returns WithConcurrency/WithVisibilityTimeout
 		// unconditionally, plus WithMaxReceiveCount only when
@@ -260,12 +277,12 @@ func run() error {
 	// offboarding one above, not a discriminated payload on the same
 	// queue, so each cascade's failure mode (and DLQ depth alert) stays
 	// independently observable.
-	memberRemovalConsumer := consumer.NewMemberRemovalConsumer(repo, memberRemovalProcessedEvents, svcMetrics, logger, tracer)
+	memberRemovalConsumer := consumer.NewMemberRemovalConsumer(repo, memberRemovalProcessedEvents, svcMetrics, svcLog, tracer)
 	memberRemovalEventsConsumer, err := events.NewSQSConsumer(
 		events.SQSConfig{
 			QueueURL: cfg.MemberRemovalQueueURL,
 			Region:   cfg.AWSRegion,
-			Logger:   mapLogger,
+			Logger:   log,
 		},
 		memberRemovalConsumer.Handle,
 		events.WithConcurrency(getEnvInt("CONSUMER_CONCURRENCY", 4)),
@@ -287,7 +304,7 @@ func run() error {
 	group, gctx := errgroup.WithContext(baseCtx)
 
 	group.Go(func() error {
-		logger.Info("http server listening", slog.String("addr", httpServer.Addr))
+		svcLog.Info("http server listening", "addr", httpServer.Addr)
 		if err := httpServer.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			return fmt.Errorf("http server: %w", err)
 		}
@@ -295,7 +312,7 @@ func run() error {
 	})
 
 	group.Go(func() error {
-		logger.Info("metrics server listening", slog.String("addr", metricsServer.Addr))
+		svcLog.Info("metrics server listening", "addr", metricsServer.Addr)
 		if err := metricsServer.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			return fmt.Errorf("metrics server: %w", err)
 		}
@@ -311,12 +328,12 @@ func run() error {
 	})
 
 	group.Go(func() error {
-		runProcessedEventsCleanup(gctx, offboardingProcessedEvents, cfg.ProcessedEventsCleanupInterval, logger)
+		runProcessedEventsCleanup(gctx, offboardingProcessedEvents, cfg.ProcessedEventsCleanupInterval, svcLog)
 		return nil
 	})
 
 	group.Go(func() error {
-		runProcessedEventsCleanup(gctx, memberRemovalProcessedEvents, cfg.ProcessedEventsCleanupInterval, logger)
+		runProcessedEventsCleanup(gctx, memberRemovalProcessedEvents, cfg.ProcessedEventsCleanupInterval, svcLog)
 		return nil
 	})
 
@@ -328,34 +345,25 @@ func run() error {
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
 		if err := httpServer.Shutdown(shutdownCtx); err != nil { //nolint:contextcheck // see above
-			logger.Error("http server shutdown failed", slog.String("error", err.Error()))
+			svcLog.Error("http server shutdown failed", "error", err.Error()) //nolint:contextcheck // see above
 		}
 		if err := metricsServer.Shutdown(shutdownCtx); err != nil { //nolint:contextcheck // see above
-			logger.Error("metrics server shutdown failed", slog.String("error", err.Error()))
+			svcLog.Error("metrics server shutdown failed", "error", err.Error()) //nolint:contextcheck // see above
 		}
 		if err := eventsConsumer.Stop(); err != nil {
-			logger.Error("events consumer stop failed", slog.String("error", err.Error()))
+			svcLog.Error("events consumer stop failed", "error", err.Error()) //nolint:contextcheck // see above
 		}
 		if err := memberRemovalEventsConsumer.Stop(); err != nil {
-			logger.Error("member removal events consumer stop failed", slog.String("error", err.Error()))
+			svcLog.Error("member removal events consumer stop failed", "error", err.Error()) //nolint:contextcheck // see above
 		}
 		return nil
 	})
 
-	logger.Info("tender-acl started", slog.String("environment", cfg.Environment), slog.String("build_version", buildVersion))
+	svcLog.Info("tender-acl started", "environment", cfg.Environment, "build_version", buildVersion)
 	return group.Wait()
 }
 
-func newLogger(cfg config) *slog.Logger {
-	var level slog.Level
-	if err := level.UnmarshalText([]byte(cfg.LogLevel)); err != nil {
-		level = slog.LevelInfo
-	}
-	handler := slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: level})
-	return slog.New(handler)
-}
-
-func runProcessedEventsCleanup(ctx context.Context, repo *consumer.ProcessedEvents, interval time.Duration, logger *slog.Logger) {
+func runProcessedEventsCleanup(ctx context.Context, repo *consumer.ProcessedEvents, interval time.Duration, log port.SlogStyleLogger) {
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 	for {
@@ -365,11 +373,11 @@ func runProcessedEventsCleanup(ctx context.Context, repo *consumer.ProcessedEven
 		case <-ticker.C:
 			deleted, err := repo.CleanupExpired(ctx)
 			if err != nil {
-				logger.Error("processed_events cleanup failed", slog.String("error", err.Error()))
+				log.ErrorContext(ctx, "processed_events cleanup failed", "error", err.Error())
 				continue
 			}
 			if deleted > 0 {
-				logger.Info("processed_events cleanup complete", slog.Int64("deleted", deleted))
+				log.InfoContext(ctx, "processed_events cleanup complete", "deleted", deleted)
 			}
 		}
 	}

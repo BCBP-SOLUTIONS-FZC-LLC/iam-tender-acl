@@ -37,10 +37,11 @@ graph TD
         domain["acl.go — TenderACLEntry · TenderACLLevel (view/edit/approve) · IsActive()\nCachedAccess (TAC-4 result / cache wire shape)\nerrors.go — Error, error codes"]
     end
 
-    subgraph portpkg["internal/core/port/  —  interfaces, no implementations"]
+    subgraph portpkg["internal/core/port/  —  interfaces (+ one real implementation)"]
         repoiface["acl_repository.go — TenderACLRepository interface"]
         mciface["membershipcheck.go — MembershipCheckClient interface"]
         cacheiface["cache.go — Cache interface"]
+        loggeriface["logger.go — Logger interface + SlogStyleLogger\n(*slog.Logger-call-syntax wrapper, mirrors iam-org-membership)"]
     end
 
     subgraph servicepkg["internal/core/service/  —  business logic, depends only on domain+port"]
@@ -56,7 +57,7 @@ graph TD
     end
 
     subgraph pgadapter["internal/adapter/outbound/postgres/  —  persistence adapter"]
-        repo["repository.go — TenderACLRepository (pgx impl), incl. CascadeDeleteForTenant\nmigrations/ — schema, RLS, touch_row(), roles"]
+        repo["repository.go — TenderACLRepository (pgx impl), incl. CascadeDeleteForTenant\ndb.go — DSNFromEnv/ApplyStatementTimeout/MigrationDSNFromEnv\nlogger_adapter.go — port.Logger to pgcommon's domain.Logger\nmigrations/ — schema, RLS, touch_row(), roles"]
     end
 
     subgraph valkeyadapter["internal/adapter/outbound/valkey/  —  cache adapter"]
@@ -109,7 +110,7 @@ graph LR
     main(["cmd/tender-acl/main.go"])
 
     domain(["internal/core/domain\n(TenderACLEntry, CachedAccess, domain.Error)"])
-    port(["internal/core/port\n(TenderACLRepository, MembershipCheckClient, Cache interfaces)"])
+    port(["internal/core/port\n(TenderACLRepository, MembershipCheckClient, Cache interfaces;\nLogger interface + SlogStyleLogger implementation)"])
     service(["internal/core/service\n(ACLService — business logic)"])
     obs(["internal/adapter/outbound/metrics\n(cross-cutting OTel instruments)"])
 
@@ -440,9 +441,14 @@ sequenceDiagram
   `otelgin (inbound.http) → service.ACLService.<method> → outbound.postgres` (+
   `outbound.membershipcheck` only on Grant, + `tac:*` cache read/DEL spans on
   CheckAccess/Grant/Revoke).
-- **Logging**: structured `slog` JSON, carries `trace_id`/`tenant_id` on writes and cascade
-  operations. Cache/DB best-effort failures (cache invalidation, cache populate) are logged at
-  `WARN`, never escalated to a caller-visible error.
+- **Logging**: a single Zap-backed logger built via `platform-gincommon/pkg/logger.NewLogger`
+  (`cmd/tender-acl/main.go`), matching `iam-user-profile`'s/`iam-org-membership`'s identical
+  convention — every log line in this process (HTTP request logs, pgcommon slow-query/migration
+  logs, SQS warnings, the service/consumer layers) flows through it, not a local slog JSON handler.
+  `internal/core/port.SlogStyleLogger` preserves the existing `*slog.Logger`-style call syntax on
+  top of that shared sink; `*Context` calls carry `trace_id` automatically, and both consumers bind
+  `tenant_id`/`event_id` once per `Handle` call. Cache/DB best-effort failures (cache invalidation,
+  cache populate) are logged at `WARN`, never escalated to a caller-visible error.
 - **Dashboards**: "Tender ACL" Grafana folder — Requests & Writes; Grant-Time Membership Check;
   Tenant-Offboarding Cleanup (LLD §14.4).
 - **Alerts** (LLD §14.5): `/readyz` failing >5min → SEV-2; TAC-4 error rate >10%/5min → SEV-2; Core

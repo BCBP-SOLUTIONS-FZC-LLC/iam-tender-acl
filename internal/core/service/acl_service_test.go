@@ -3,7 +3,6 @@ package service
 import (
 	"context"
 	"errors"
-	"log/slog"
 	"testing"
 	"time"
 
@@ -103,7 +102,7 @@ func (fakeMetrics) RecordCacheMiss(context.Context)             {}
 var _ ACLMetrics = fakeMetrics{}
 
 func newTestService(repo port.TenderACLRepository, checker port.MembershipCheckClient, c port.Cache, _ *testing.T) *ACLService {
-	return NewACLService(repo, checker, c, fakeMetrics{}, slog.Default(), otel.Tracer("test"))
+	return NewACLService(repo, checker, c, fakeMetrics{}, port.SlogStyleLogger{}, otel.Tracer("test"))
 }
 
 func activeChecker(membershipID uuid.UUID) *fakeChecker {

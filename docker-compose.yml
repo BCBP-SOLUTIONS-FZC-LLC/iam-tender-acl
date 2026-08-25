@@ -129,7 +129,6 @@ services:
       # otlptracehttp (HTTP, not gRPC) — the collector's default port is
       # 4318, not the gRPC default of 4317.
       OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4318
-      LOG_LEVEL: debug
       ENVIRONMENT: development
     restart: unless-stopped
 

@@ -2,7 +2,7 @@ graph LR
     main(["cmd/tender-acl/main.go"])
 
     domain(["internal/core/domain\n(TenderACLEntry, CachedAccess, domain.Error)"])
-    port(["internal/core/port\n(TenderACLRepository, MembershipCheckClient, Cache interfaces)"])
+    port(["internal/core/port\n(TenderACLRepository, MembershipCheckClient, Cache interfaces;\nLogger interface + SlogStyleLogger implementation)"])
     service(["internal/core/service\n(ACLService — business logic)"])
     obs(["internal/adapter/outbound/metrics\n(cross-cutting OTel instruments)"])
 

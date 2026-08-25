@@ -4,7 +4,6 @@ package integration
 
 import (
 	"context"
-	"log/slog"
 	"testing"
 
 	"github.com/google/uuid"
@@ -14,6 +13,7 @@ import (
 
 	"github.com/BCBP-SOLUTIONS-FZC-LLC/iam-tender-acl/internal/adapter/outbound/metrics"
 	"github.com/BCBP-SOLUTIONS-FZC-LLC/iam-tender-acl/internal/core/domain"
+	"github.com/BCBP-SOLUTIONS-FZC-LLC/iam-tender-acl/internal/core/port"
 	"github.com/BCBP-SOLUTIONS-FZC-LLC/iam-tender-acl/internal/core/service"
 )
 
@@ -44,7 +44,7 @@ func TestService_CheckAccess_CacheHit_ThenCacheMissAfterDelete(t *testing.T) {
 	tenantID, tenderID, userID := uuid.New(), uuid.New(), uuid.New()
 	membershipID := uuid.New()
 
-	svc := service.NewACLService(repo, stubChecker{active: true, membershipID: membershipID}, valkeyCache, testMetrics(t), slog.Default(), otel.Tracer("test"))
+	svc := service.NewACLService(repo, stubChecker{active: true, membershipID: membershipID}, valkeyCache, testMetrics(t), port.SlogStyleLogger{}, otel.Tracer("test"))
 
 	created, err := svc.Grant(ctx, tenantID, tenderID, userID, uuid.New(), domain.ACLApprove, "", nil)
 	require.NoError(t, err)
@@ -78,7 +78,7 @@ func TestService_Grant_PersistsMembershipIDFromChecker(t *testing.T) {
 	tenantID, tenderID, userID := uuid.New(), uuid.New(), uuid.New()
 	membershipID := uuid.New()
 
-	svc := service.NewACLService(repo, stubChecker{active: true, membershipID: membershipID}, valkeyCache, testMetrics(t), slog.Default(), otel.Tracer("test"))
+	svc := service.NewACLService(repo, stubChecker{active: true, membershipID: membershipID}, valkeyCache, testMetrics(t), port.SlogStyleLogger{}, otel.Tracer("test"))
 
 	created, err := svc.Grant(ctx, tenantID, tenderID, userID, uuid.New(), domain.ACLView, "", nil)
 	require.NoError(t, err)
@@ -90,7 +90,7 @@ func TestService_Grant_CheckerNotActive_NoRowWritten(t *testing.T) {
 	ctx := context.Background()
 	tenantID, tenderID, userID := uuid.New(), uuid.New(), uuid.New()
 
-	svc := service.NewACLService(repo, stubChecker{active: false}, valkeyCache, testMetrics(t), slog.Default(), otel.Tracer("test"))
+	svc := service.NewACLService(repo, stubChecker{active: false}, valkeyCache, testMetrics(t), port.SlogStyleLogger{}, otel.Tracer("test"))
 
 	_, err := svc.Grant(ctx, tenantID, tenderID, userID, uuid.New(), domain.ACLView, "", nil)
 	require.Error(t, err)

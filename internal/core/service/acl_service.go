@@ -7,7 +7,6 @@ package service
 import (
 	"context"
 	"fmt"
-	"log/slog"
 	"time"
 
 	"github.com/google/uuid"
@@ -43,12 +42,12 @@ type ACLService struct {
 	checker port.MembershipCheckClient
 	cache   port.Cache
 	metrics ACLMetrics
-	logger  *slog.Logger
+	logger  port.SlogStyleLogger
 	tracer  trace.Tracer
 }
 
 // NewACLService wires an ACLService from its ports.
-func NewACLService(repo port.TenderACLRepository, checker port.MembershipCheckClient, cache port.Cache, metrics ACLMetrics, logger *slog.Logger, tracer trace.Tracer) *ACLService {
+func NewACLService(repo port.TenderACLRepository, checker port.MembershipCheckClient, cache port.Cache, metrics ACLMetrics, logger port.SlogStyleLogger, tracer trace.Tracer) *ACLService {
 	return &ACLService{repo: repo, checker: checker, cache: cache, metrics: metrics, logger: logger, tracer: tracer}
 }
 
@@ -121,7 +120,7 @@ func (s *ACLService) Grant(
 	s.metrics.RecordWrite(ctx, "grant", "success")
 
 	if err := s.cache.Delete(ctx, tenantID, tenderID, userID); err != nil {
-		s.logger.WarnContext(ctx, "acl check cache invalidation failed after grant", slog.String("error", err.Error()))
+		s.logger.WarnContext(ctx, "acl check cache invalidation failed after grant", "error", err.Error())
 	}
 
 	return created, nil
@@ -145,7 +144,7 @@ func (s *ACLService) Revoke(ctx context.Context, tenantID, tenderID, userID uuid
 	// LLD §9: DELETE, not update, so a process crash mid-write can never
 	// leave a stale has_access:true value being served.
 	if err := s.cache.Delete(ctx, tenantID, tenderID, userID); err != nil {
-		s.logger.WarnContext(ctx, "acl check cache invalidation failed after revoke", slog.String("error", err.Error()))
+		s.logger.WarnContext(ctx, "acl check cache invalidation failed after revoke", "error", err.Error())
 	}
 	return nil
 }
@@ -159,7 +158,7 @@ func (s *ACLService) CheckAccess(ctx context.Context, tenantID, tenderID, userID
 	if cached, hit, err := s.cache.Get(ctx, tenantID, tenderID, userID); err != nil {
 		// A Valkey error is a distinct failure mode (LLD §9.4) from an
 		// ordinary miss — logged, but counted in neither cache metric.
-		s.logger.WarnContext(ctx, "acl check cache read failed, falling back to postgres", slog.String("error", err.Error()))
+		s.logger.WarnContext(ctx, "acl check cache read failed, falling back to postgres", "error", err.Error())
 	} else if hit {
 		s.metrics.RecordCacheHit(ctx)
 		s.metrics.RecordCheckCall(ctx, statusFor(cached.HasAccess))
@@ -183,7 +182,7 @@ func (s *ACLService) CheckAccess(ctx context.Context, tenantID, tenderID, userID
 	s.metrics.RecordCheckCall(ctx, statusFor(result.HasAccess))
 
 	if err := s.cache.Set(ctx, tenantID, tenderID, userID, result); err != nil {
-		s.logger.WarnContext(ctx, "acl check cache populate failed", slog.String("error", err.Error()))
+		s.logger.WarnContext(ctx, "acl check cache populate failed", "error", err.Error())
 	}
 	return result, nil
 }

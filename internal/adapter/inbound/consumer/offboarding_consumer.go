@@ -4,11 +4,11 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"log/slog"
 
 	"github.com/google/uuid"
 	"go.opentelemetry.io/otel/trace"
 
+	"github.com/BCBP-SOLUTIONS-FZC-LLC/iam-tender-acl/internal/core/port"
 	events "github.com/BCBP-SOLUTIONS-FZC-LLC/platform-events/pkg/events"
 )
 
@@ -54,12 +54,12 @@ type OffboardingConsumer struct {
 	repo        CascadeDeleter
 	idempotency IdempotencyStore
 	metrics     CascadeMetrics
-	logger      *slog.Logger
+	logger      port.SlogStyleLogger
 	tracer      trace.Tracer
 }
 
 // NewOffboardingConsumer builds an OffboardingConsumer.
-func NewOffboardingConsumer(repo CascadeDeleter, idempotency IdempotencyStore, metrics CascadeMetrics, logger *slog.Logger, tracer trace.Tracer) *OffboardingConsumer {
+func NewOffboardingConsumer(repo CascadeDeleter, idempotency IdempotencyStore, metrics CascadeMetrics, logger port.SlogStyleLogger, tracer trace.Tracer) *OffboardingConsumer {
 	return &OffboardingConsumer{repo: repo, idempotency: idempotency, metrics: metrics, logger: logger, tracer: tracer}
 }
 
@@ -75,8 +75,8 @@ func (c *OffboardingConsumer) Handle(ctx context.Context, env events.Envelope[js
 
 	if env.Type != "" && env.Type != tenantMembershipsPurgedEventType {
 		c.logger.WarnContext(ctx, "ignoring unexpected event type on tenant-lifecycle-tenderacl-q",
-			slog.String("event_type", env.Type),
-			slog.String("event_id", env.ID),
+			"event_type", env.Type,
+			"event_id", env.ID,
 		)
 		return nil
 	}
@@ -91,8 +91,8 @@ func (c *OffboardingConsumer) Handle(ctx context.Context, env events.Envelope[js
 	}
 
 	logger := c.logger.With(
-		slog.String("tenant_id", tenantID.String()),
-		slog.String("event_id", eventID.String()),
+		"tenant_id", tenantID.String(),
+		"event_id", eventID.String(),
 	)
 
 	processed, err := c.idempotency.IsProcessed(ctx, eventID)
@@ -115,6 +115,6 @@ func (c *OffboardingConsumer) Handle(ctx context.Context, env events.Envelope[js
 	}
 
 	c.metrics.RecordCascade(ctx, "success")
-	logger.InfoContext(ctx, "tenant offboarding cascade complete", slog.Int64("deleted", deleted))
+	logger.InfoContext(ctx, "tenant offboarding cascade complete", "deleted", deleted)
 	return nil
 }

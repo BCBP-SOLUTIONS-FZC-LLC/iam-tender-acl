@@ -4,11 +4,11 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"log/slog"
 
 	"github.com/google/uuid"
 	"go.opentelemetry.io/otel/trace"
 
+	"github.com/BCBP-SOLUTIONS-FZC-LLC/iam-tender-acl/internal/core/port"
 	events "github.com/BCBP-SOLUTIONS-FZC-LLC/platform-events/pkg/events"
 )
 
@@ -51,12 +51,12 @@ type MemberRemovalConsumer struct {
 	repo        UserRemovalCascader
 	idempotency IdempotencyStore
 	metrics     MemberRemovalMetrics
-	logger      *slog.Logger
+	logger      port.SlogStyleLogger
 	tracer      trace.Tracer
 }
 
 // NewMemberRemovalConsumer builds a MemberRemovalConsumer.
-func NewMemberRemovalConsumer(repo UserRemovalCascader, idempotency IdempotencyStore, metrics MemberRemovalMetrics, logger *slog.Logger, tracer trace.Tracer) *MemberRemovalConsumer {
+func NewMemberRemovalConsumer(repo UserRemovalCascader, idempotency IdempotencyStore, metrics MemberRemovalMetrics, logger port.SlogStyleLogger, tracer trace.Tracer) *MemberRemovalConsumer {
 	return &MemberRemovalConsumer{repo: repo, idempotency: idempotency, metrics: metrics, logger: logger, tracer: tracer}
 }
 
@@ -69,8 +69,8 @@ func (c *MemberRemovalConsumer) Handle(ctx context.Context, env events.Envelope[
 
 	if env.Type != "" && env.Type != membershipRevokedEventType {
 		c.logger.WarnContext(ctx, "ignoring unexpected event type on member-removal-tenderacl-q",
-			slog.String("event_type", env.Type),
-			slog.String("event_id", env.ID),
+			"event_type", env.Type,
+			"event_id", env.ID,
 		)
 		return nil
 	}
@@ -92,9 +92,9 @@ func (c *MemberRemovalConsumer) Handle(ctx context.Context, env events.Envelope[
 	}
 
 	logger := c.logger.With(
-		slog.String("tenant_id", tenantID.String()),
-		slog.String("user_id", userID.String()),
-		slog.String("event_id", eventID.String()),
+		"tenant_id", tenantID.String(),
+		"user_id", userID.String(),
+		"event_id", eventID.String(),
 	)
 
 	processed, err := c.idempotency.IsProcessed(ctx, eventID)
@@ -117,6 +117,6 @@ func (c *MemberRemovalConsumer) Handle(ctx context.Context, env events.Envelope[
 	}
 
 	c.metrics.RecordMemberRemovalCascade(ctx, "success")
-	logger.InfoContext(ctx, "member removal ACL cascade complete", slog.Int64("deleted", deleted))
+	logger.InfoContext(ctx, "member removal ACL cascade complete", "deleted", deleted)
 	return nil
 }

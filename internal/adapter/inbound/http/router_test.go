@@ -1,7 +1,6 @@
 package http
 
 import (
-	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -9,30 +8,6 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/stretchr/testify/assert"
 )
-
-// ── slogPlatformLogger ────────────────────────────────────────────────────────
-
-func TestSlogPlatformLogger_AllLevels_DoNotPanic(t *testing.T) {
-	l := slogPlatformLogger{l: slog.Default()}
-	fields := map[string]interface{}{"key": "value", "count": 1}
-	assert.NotPanics(t, func() { l.Debug("debug msg", fields) })
-	assert.NotPanics(t, func() { l.Info("info msg", fields) })
-	assert.NotPanics(t, func() { l.Warn("warn msg", fields) })
-	assert.NotPanics(t, func() { l.Error("error msg", fields) })
-}
-
-// ── mapToArgs ─────────────────────────────────────────────────────────────────
-
-func TestMapToArgs_EmptyMap_ReturnsEmptySlice(t *testing.T) {
-	args := mapToArgs(map[string]interface{}{})
-	assert.Empty(t, args)
-}
-
-func TestMapToArgs_WithFields_ReturnsKeyValuePairs(t *testing.T) {
-	args := mapToArgs(map[string]interface{}{"k": "v"})
-	assert.Len(t, args, 2)
-	// args is [key, value, ...] — order not guaranteed for maps, just check length
-}
 
 // ── Swagger docs routes (SEC-SWAGGER-01/02) ───────────────────────────────────
 

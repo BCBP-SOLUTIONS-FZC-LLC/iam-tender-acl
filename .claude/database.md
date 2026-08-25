@@ -115,7 +115,15 @@ trigger function (identical to `iam-group-mapping`'s), `tender_acl_entries` + it
 RLS policy, `processed_events` + its prune index, and the `tender_acl_app`/`tender_acl_migrator`
 roles + grants.
 
-## Slow-query / pool tuning
+## DSN resolution and slow-query / pool tuning
+
+`internal/adapter/outbound/postgres/db.go`'s `DSNFromEnv`/`ApplyStatementTimeout`/
+`MigrationDSNFromEnv` are the single DSN-assembly path for both pools and the migration runner —
+mirroring `iam-user-profile`'s and `iam-org-membership`'s identical helpers, so DSN assembly has
+exactly one implementation instead of a second one hand-rolled in `cmd/tender-acl`. `PG_STATEMENT_TIMEOUT`
+(a Go duration, e.g. `5s`) is appended as a server-side `statement_timeout` — but only when the DSN
+is assembled from `PG_*` vars, not when `DATABASE_URL` is set directly (its query string is passed
+through verbatim, matching the same rule both siblings apply).
 
 `PG_MAX_CONNS=10`, `PG_MIN_CONNS=2`, `PG_SLOW_QUERY_THRESHOLD=200ms` — read via
 `pgcommon.ConfigFromEnv()`, safe to omit (library defaults apply). `/readyz` surfaces pool

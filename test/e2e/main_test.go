@@ -13,8 +13,6 @@ package e2e
 import (
 	"context"
 	"fmt"
-	"io"
-	"log/slog"
 	"net/http"
 	"os"
 	"testing"
@@ -29,6 +27,7 @@ import (
 	"github.com/BCBP-SOLUTIONS-FZC-LLC/iam-tender-acl/internal/adapter/outbound/metrics"
 	aclpostgres "github.com/BCBP-SOLUTIONS-FZC-LLC/iam-tender-acl/internal/adapter/outbound/postgres"
 	"github.com/BCBP-SOLUTIONS-FZC-LLC/iam-tender-acl/internal/adapter/outbound/valkey"
+	"github.com/BCBP-SOLUTIONS-FZC-LLC/iam-tender-acl/internal/core/port"
 	"github.com/BCBP-SOLUTIONS-FZC-LLC/iam-tender-acl/internal/core/service"
 	"github.com/BCBP-SOLUTIONS-FZC-LLC/iam-tender-acl/test/testutil"
 
@@ -97,7 +96,6 @@ func runTestMain(m *testing.M) int {
 	defer rawRedis.Close()
 	aclCache := valkey.NewCache(rawRedis)
 
-	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	svcMetrics, err := metrics.NewMetrics()
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "build metrics:", err)
@@ -106,9 +104,12 @@ func runTestMain(m *testing.M) int {
 	tracer := nooptrace.NewTracerProvider().Tracer("e2e")
 
 	repo := aclpostgres.NewTenderACLRepository(pgPool)
-	svc := service.NewACLService(repo, fakeChecks, aclCache, svcMetrics, logger, tracer)
+	svc := service.NewACLService(repo, fakeChecks, aclCache, svcMetrics, port.SlogStyleLogger{}, tracer)
 	h := httpadapter.NewHandler(svc)
-	router := httpadapter.NewRouter(h, pgPool, aclCache, logger, nil, httpadapter.DocsConfig{Environment: "development"})
+	// nil Logger — gincommon.Config.Logger's own doc comment documents nil
+	// as valid (disables logging, no-op); no test here asserts on log
+	// output.
+	router := httpadapter.NewRouter(h, pgPool, aclCache, nil, nil, httpadapter.DocsConfig{Environment: "development"})
 	handler = router.Handler()
 
 	return m.Run()
