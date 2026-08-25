@@ -53,8 +53,8 @@ design choice for this service's lifetime, not a gap.
 
 | Event | Queue | Consumer | Action |
 |---|---|---|---|
-| `TenantOffboarded` | `tenant-lifecycle-tenderacl-q` (+ DLQ) | `OffboardingConsumer` (`consumer="tenant_lifecycle_cleanup"`) | `CascadeDeleteForTenant` — hard `DELETE FROM tender_acl_entries WHERE tenant_id=$1` |
-| `TenantMembershipRemoved` | `member-removal-tenderacl-q` (+ DLQ) | `MemberRemovalConsumer` (`consumer="member_removal"`) | `SoftDeleteForUser` — reads `env.Subject` as the removed user ID |
+| `TenantMembershipsPurged` (Core's rename of its former `TenantOffboarded`, ADR-0008 — the rename stops it colliding with Realm Provisioner's own, differently-scoped `TenantOffboarded`) | `tenant-lifecycle-tenderacl-q` (+ DLQ) | `OffboardingConsumer` (`consumer="tenant_lifecycle_cleanup"`) | `CascadeDeleteForTenant` — hard `DELETE FROM tender_acl_entries WHERE tenant_id=$1` |
+| `MembershipRevoked` (Core's rename/consolidation of its former `TenantMembershipRemoved`, ADR-0008 — now shared with the Delegation service) | `member-removal-tenderacl-q` (+ DLQ) | `MemberRemovalConsumer` (`consumer="member_removal"`) | `SoftDeleteForUser` — reads `env.Subject` as the removed user ID |
 
 Queue #1 is built via `platform-events/pkg/config.SQSConfigFromEnv(sqsEnv, ...)` +
 `SQSConsumerOptions(sqsEnv)...`, where `sqsEnv := eventsconfig.LoadSQS()` (validated, warnings
@@ -73,8 +73,8 @@ this call runs once.
 ## AsyncAPI contract and viewer
 
 `api/asyncapi.yaml` (AsyncAPI 3.0) is the source of truth for the event contract above —
-`components.tags.{published,consumed}` + a `tags: [$ref consumed]` on both `TenantOffboarded` and
-`TenantMembershipRemoved` messages (there is no `published` tag usage anywhere in this spec, by
+`components.tags.{published,consumed}` + a `tags: [$ref consumed]` on both `TenantMembershipsPurged`
+and `MembershipRevoked` messages (there is no `published` tag usage anywhere in this spec, by
 design).
 
 It is served two ways, both gated by `DocsConfig`/`docsAuthMiddleware` (dev-only by default;
@@ -93,7 +93,7 @@ It is served two ways, both gated by `DocsConfig`/`docsAuthMiddleware` (dev-only
   adaptation** beyond the ported code: the "Published Messages" section/sidebar group is omitted
   **entirely** (not rendered empty) since this service publishes nothing — `iam-user-profile`'s own
   viewer always renders both headings because it always has ≥1 published message. Both
-  `TenantOffboarded` and `TenantMembershipRemoved` render under "Consumed Messages" with a
+  `TenantMembershipsPurged` and `MembershipRevoked` render under "Consumed Messages" with a
   `RECEIVE` badge.
 
 `sync.Once`-cached parse (`loadAsyncSpec`/`parseAsyncSpec`) — no per-request disk I/O either way,

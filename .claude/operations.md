@@ -104,10 +104,6 @@ Three have **no safe default** and must be set or the process fails fast at star
 | `DOCS_ENABLED` | opt `/swagger` and `/asyncapi`/`/asyncapi.yaml` into production | `false` |
 | `DOCS_AUTH_TOKEN` | if set, requires `Authorization: Bearer <token>` on those routes in production | — |
 
-> `.env.example` still has a stale line under "Docs surface" claiming `api/asyncapi.yaml` is
-> "never embedded or served" — that's no longer true since `api/embed.go` + the `/asyncapi` route
-> were added; worth fixing next time that file is touched.
-
 ## CI/CD
 
 `.github/workflows/ci.yml` fans out three parallel jobs on push/PR (paths-ignore skips pure-doc

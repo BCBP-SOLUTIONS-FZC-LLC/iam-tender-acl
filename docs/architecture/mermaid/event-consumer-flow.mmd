@@ -6,9 +6,9 @@ sequenceDiagram
     participant DB as PostgreSQL
     participant DLQ as tenant-lifecycle-tenderacl-q-dlq
 
-    Note over SQS,DLQ: This service is receive-only on the event bus (TAC-EVT-1, TAC-D5).<br/>It publishes zero events — no outbox, no SNS producer. It now consumes<br/>TWO event types on two independent queues (ADR-0007 Wave 3 Phase 3<br/>added a second one, see member-removal-flow.mmd) — this diagram shows<br/>TenantOffboarded only.
+    Note over SQS,DLQ: This service is receive-only on the event bus (TAC-EVT-1, TAC-D5).<br/>It publishes zero events — no outbox, no SNS producer. It now consumes<br/>TWO event types on two independent queues (ADR-0007 Wave 3 Phase 3<br/>added a second one, see member-removal-flow.mmd) — this diagram shows<br/>TenantMembershipsPurged only (Core's rename of its former<br/>TenantOffboarded event, ADR-0008, so it stops colliding with<br/>Realm Provisioner's own, differently-scoped TenantOffboarded).
 
-    SQS ->>+ C: TenantOffboarded{event_id, tenant_id, occurred_at}
+    SQS ->>+ C: TenantMembershipsPurged{event_id, tenant_id, occurred_at}
     C ->> C: json.Unmarshal + validate event_type/event_id/tenant_id present
 
     C ->>+ Idem: IsProcessed(ctx, event_id)
@@ -25,7 +25,7 @@ sequenceDiagram
         SVC -->>- C: nil | error
 
         alt cascade succeeded
-            C ->>+ Idem: MarkProcessed(ctx, event_id, "TenantOffboarded", 8d retention)
+            C ->>+ Idem: MarkProcessed(ctx, event_id, "TenantMembershipsPurged", 8d retention)
             Note over Idem: ON CONFLICT DO NOTHING — safe if a concurrent<br/>redelivery already recorded the same event_id
             Idem -->>- C: ok
             C -->> SQS: nil (ack — message deleted)

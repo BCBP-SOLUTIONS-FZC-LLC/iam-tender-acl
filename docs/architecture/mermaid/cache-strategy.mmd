@@ -23,7 +23,7 @@ flowchart TD
     end
 
     subgraph offboard["Tenant Offboarding Cascade"]
-        O1([TenantOffboarded consumed]) --> O2["DELETE FROM tender_acl_entries\nWHERE tenant_id=$1"]
+        O1([TenantMembershipsPurged consumed]) --> O2["DELETE FROM tender_acl_entries\nWHERE tenant_id=$1"]
         O2 --> O3["No cache invalidation performed here —\nany cached tac:acl:* entries for the\noffboarded tenant simply expire within 30s"]
     end
 

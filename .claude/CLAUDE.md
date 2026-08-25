@@ -22,9 +22,11 @@ It has **one synchronous outbound dependency** (a grant-time-only membership-exi
 against `iam-org-membership`, TAC-2 only) and **two inbound async subscriptions** — no outbound
 events, ever:
 
-- `TenantOffboarded` → cascade-**delete** all of a tenant's ACL rows (`OffboardingConsumer`)
-- `TenantMembershipRemoved` → cascade-**soft-delete** one user's ACL rows in that tenant
-  (`MemberRemovalConsumer`, ADR-0007 Wave 3 Phase 3)
+- `TenantMembershipsPurged` (Core's rename of its former `TenantOffboarded`, ADR-0008) →
+  cascade-**delete** all of a tenant's ACL rows (`OffboardingConsumer`)
+- `MembershipRevoked` (Core's rename/consolidation of its former `TenantMembershipRemoved`,
+  ADR-0008) → cascade-**soft-delete** one user's ACL rows in that tenant (`MemberRemovalConsumer`,
+  ADR-0007 Wave 3 Phase 3)
 
 Unlike its two ADR-0007 siblings (`iam-catalog-admin`, `iam-group-mapping`), this service **is** on
 a live authorization-decision path (TAC-4, the I-12 successor) — its cache and latency posture get
@@ -88,7 +90,8 @@ internal/
       valkey/                           Cache impl (tac:acl:* keys)
       membershipcheck/                  MembershipCheckClient impl (HTTP call to iam-org-membership)
       metrics/                          business-only Prometheus metrics (see operations.md)
-migrations/ → internal/adapter/outbound/postgres/migrations/  0001..0005, up/down pairs
+migrations/ → internal/adapter/outbound/postgres/migrations/  single 0001_tender_acl_schema pair
+                                       (never deployed — consolidated, not incremental, LLD §21)
 ```
 
 ## Shared platform libraries

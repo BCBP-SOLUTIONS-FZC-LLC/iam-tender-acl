@@ -64,7 +64,7 @@ Docs, once running (port from `HTTP_PORT`, see `.env.example`):
 | Tool | URL | Notes |
 |---|---|---|
 | Swagger UI | `http://localhost:8086/swagger/index.html` | REST contract (TAC-1/2/3/4). Regenerate after changing a handler's `// @…` annotations with `make swag`; `make swag-check` is the CI drift gate. |
-| AsyncAPI viewer | `http://localhost:8086/asyncapi` | Event contract browser for `api/asyncapi.yaml` — server-rendered HTML, no CDN dependencies. This service publishes zero events (TAC-EVT-1), so both `TenantOffboarded` and `TenantMembershipRemoved` render under "Consumed Messages" with a `RECEIVE` badge; there is no "Published Messages" section. `GET /asyncapi.yaml` serves the spec itself, embedded into the binary at compile time (`api/embed.go`) rather than read from disk, so it works the same way in the built container image as it does locally. |
+| AsyncAPI viewer | `http://localhost:8086/asyncapi` | Event contract browser for `api/asyncapi.yaml` — server-rendered HTML, no CDN dependencies. This service publishes zero events (TAC-EVT-1), so both `TenantMembershipsPurged` and `MembershipRevoked` render under "Consumed Messages" with a `RECEIVE` badge; there is no "Published Messages" section. `GET /asyncapi.yaml` serves the spec itself, embedded into the binary at compile time (`api/embed.go`) rather than read from disk, so it works the same way in the built container image as it does locally. |
 
 Both are dev-only by default; see `DOCS_ENABLED`/`DOCS_AUTH_TOKEN` below to opt either into production.
 

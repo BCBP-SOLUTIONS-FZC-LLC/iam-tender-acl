@@ -20,7 +20,7 @@
 
 ## Core tables
 
-### `tender_acl_entries` (migration `0003`)
+### `tender_acl_entries`
 
 Relocated from `iam-org-membership` unchanged in shape, minus two FKs that couldn't survive the
 database split — see "What was lost" below.
@@ -32,7 +32,7 @@ database split — see "What was lost" below.
 | `tender_id` | `uuid` | no FK — cross-service, Tender Service owns tenders |
 | `user_id` | `uuid` | |
 | `tenant_membership_id` | `uuid` | **audit-only** — no longer DB-validated against a live row (see below) |
-| `access_level` | `tender_acl_level` enum | `view` / `edit` / `approve` (migration `0001`) |
+| `access_level` | `tender_acl_level` enum | `view` / `edit` / `approve` |
 | `granted_by` | `uuid` | |
 | `reason` | `text` | `CHECK (reason IS NULL OR char_length(reason) <= 500)` — a DB-layer cap the LLD explicitly calls for, beyond the source schema's unbounded column |
 | `expires_at` | `timestamptz` | nullable |
@@ -46,18 +46,18 @@ Indexes: `uq_tae_active_entry` UNIQUE `(tenant_id, tender_id, user_id) WHERE del
 
 Trigger `trg_touch_tae` (name per LLD §7.5 verbatim — differs from `iam-org-membership`'s
 `trg_touch_tender_acl_entries`; the LLD name wins) — `BEFORE UPDATE ... FOR EACH ROW WHEN (OLD.* IS
-DISTINCT FROM NEW.*)`, calls `touch_row()` (migration `0002`, shared with `iam-group-mapping`).
+DISTINCT FROM NEW.*)`, calls `touch_row()` (shared with `iam-group-mapping`'s identical function).
 
 **What was lost in the split** (both replaced, not just dropped):
 - `fk_tae_tenant ... ON DELETE CASCADE REFERENCES tenants(id)` → replaced by the
-  `TenantOffboarded` consumer's cascade-delete (`OffboardingConsumer`, TAC-D7, mirrors Wave-2's
-  GM-D2 — async subscription, not a second synchronous check).
+  `TenantMembershipsPurged` consumer's cascade-delete (`OffboardingConsumer`, TAC-D7, mirrors
+  Wave-2's GM-D2 — async subscription, not a second synchronous check).
 - `fk_tae_tenant_membership ... REFERENCES tenant_memberships(id, tenant_id, user_id)` → replaced
   by a synchronous grant-time-only membership-existence check
   (`internal/adapter/outbound/membershipcheck`, TAC-D2) — `tenant_membership_id` remains for audit
   purposes only.
 
-### `processed_events` (migration `0004`)
+### `processed_events`
 
 Idempotency ledger backing **both** cascade consumers. Composite PK `(event_id, consumer)` — not
 `event_id` alone — so `OffboardingConsumer` (`consumer = "tenant_lifecycle_cleanup"`) and
@@ -93,7 +93,7 @@ now() - interval '8 days'` sweep (`ProcessedEvents.CleanupExpired`, backed by
   behavior was dropped.
 - `processed_events` has **no RLS** — it's not tenant-facing through any API.
 
-## PostgreSQL roles (migration `0005`)
+## PostgreSQL roles
 
 | Role | Purpose | `BYPASSRLS` |
 |---|---|---|
@@ -105,16 +105,15 @@ production rotates these out of band, never by editing the migration.
 
 ## Migrations
 
-| # | Name | Purpose |
-|---|---|---|
-| `0001` | `enums` | `tender_acl_level` enum (`view`/`edit`/`approve`) — local copy, cross-DB enum drift with other services is unenforced (TAC-Q6, deliberately deferred) |
-| `0002` | `touch_row_function` | Shared `touch_row()` trigger function (bumps `updated_at` + `record_version`) — identical to `iam-group-mapping`'s |
-| `0003` | `tender_acl_entries` | The domain table, indexes, trigger, RLS policy |
-| `0004` | `processed_events` | Idempotency ledger for both consumers |
-| `0005` | `app_role` | `tender_acl_app` (no BYPASSRLS) + `tender_acl_migrator` (BYPASSRLS) roles and grants |
-
-Each has a paired `.down.sql`. Files live under
-`internal/adapter/outbound/postgres/migrations/`.
+A single migration, `0001_tender_acl_schema` (+ paired `.down.sql`), under
+`internal/adapter/outbound/postgres/migrations/` — this service has never been deployed, so there's
+no prior release to preserve incremental migration history for; the schema is expressed as its
+final shape rather than as `enums`/`touch_row_function`/`tender_acl_entries`/`processed_events`/
+`app_role` steps. It creates, in order: the `tender_acl_level` enum (local copy, cross-DB enum
+drift with other services unenforced — TAC-Q6, deliberately deferred), the shared `touch_row()`
+trigger function (identical to `iam-group-mapping`'s), `tender_acl_entries` + its indexes/trigger/
+RLS policy, `processed_events` + its prune index, and the `tender_acl_app`/`tender_acl_migrator`
+roles + grants.
 
 ## Slow-query / pool tuning
 

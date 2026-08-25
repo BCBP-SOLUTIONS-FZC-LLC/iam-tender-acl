@@ -6,8 +6,8 @@ sequenceDiagram
     participant DB as PostgreSQL
     participant DLQ as member-removal-tenderacl-q-dlq
 
-    SQS ->>+ C: TenantMembershipRemoved{id, tenant_id, subject, time}
-    C ->> C: validate event type == TenantMembershipRemoved, parse id/tenant_id/subject
+    SQS ->>+ C: MembershipRevoked{id, tenant_id, subject, time}
+    C ->> C: validate event type == MembershipRevoked, parse id/tenant_id/subject
 
     C ->>+ Idem: IsProcessed(ctx, id)
     Idem -->>- C: true | false

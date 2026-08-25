@@ -239,9 +239,9 @@ sequenceDiagram
     participant DB as PostgreSQL
     participant DLQ as tenant-lifecycle-tenderacl-q-dlq
 
-    Note over SQS,DLQ: This service is receive-only on the event bus (TAC-EVT-1, TAC-D5).<br/>It publishes zero events — no outbox, no SNS producer. It now consumes<br/>TWO event types on two independent queues (ADR-0007 Wave 3 Phase 3<br/>added a second one, see member-removal-flow.mmd) — this diagram shows<br/>TenantOffboarded only.
+    Note over SQS,DLQ: This service is receive-only on the event bus (TAC-EVT-1, TAC-D5).<br/>It publishes zero events — no outbox, no SNS producer. It now consumes<br/>TWO event types on two independent queues (ADR-0007 Wave 3 Phase 3<br/>added a second one, see member-removal-flow.mmd) — this diagram shows<br/>TenantMembershipsPurged only (Core's rename of its former<br/>TenantOffboarded event, ADR-0008, so it stops colliding with<br/>Realm Provisioner's own, differently-scoped TenantOffboarded).
 
-    SQS ->>+ C: TenantOffboarded{event_id, tenant_id, occurred_at}
+    SQS ->>+ C: TenantMembershipsPurged{event_id, tenant_id, occurred_at}
     C ->> C: json.Unmarshal + validate event_type/event_id/tenant_id present
 
     C ->>+ Idem: IsProcessed(ctx, event_id)
@@ -258,7 +258,7 @@ sequenceDiagram
         SVC -->>- C: nil | error
 
         alt cascade succeeded
-            C ->>+ Idem: MarkProcessed(ctx, event_id, "TenantOffboarded", 8d retention)
+            C ->>+ Idem: MarkProcessed(ctx, event_id, "TenantMembershipsPurged", 8d retention)
             Note over Idem: ON CONFLICT DO NOTHING — safe if a concurrent<br/>redelivery already recorded the same event_id
             Idem -->>- C: ok
             C -->> SQS: nil (ack — message deleted)
@@ -288,8 +288,8 @@ sequenceDiagram
     participant DB as PostgreSQL
     participant DLQ as member-removal-tenderacl-q-dlq
 
-    SQS ->>+ C: TenantMembershipRemoved{id, tenant_id, subject, time}
-    C ->> C: validate event type == TenantMembershipRemoved, parse id/tenant_id/subject
+    SQS ->>+ C: MembershipRevoked{id, tenant_id, subject, time}
+    C ->> C: validate event type == MembershipRevoked, parse id/tenant_id/subject
 
     C ->>+ Idem: IsProcessed(ctx, id)
     Idem -->>- C: true | false
@@ -322,8 +322,8 @@ sequenceDiagram
 ### Schema dependency on the producer
 
 This service has no Glue Schema Registry integration (LLD §10.4 — explicit, documented exemption
-for `TenantOffboarded`, extended by this task to `TenantMembershipRemoved`). `api/asyncapi.yaml`'s
-`TenantOffboarded` and `TenantMembershipRemoved` messages each carry an
+for `TenantMembershipsPurged`, extended by this task to `MembershipRevoked`). `api/asyncapi.yaml`'s
+`TenantMembershipsPurged` and `MembershipRevoked` messages each carry an
 `x-consumer-schema-dependency` block documenting the exact shape each consumer depends on, since no
 automated tooling here would otherwise catch a breaking upstream change to `iam-org-membership`'s
 publish path. If a producer ever deprecates either event in favor of a replacement, this service
@@ -331,7 +331,7 @@ needs a new consumer for it before the producer's retire-after deadline — trac
 manually (there is no CI check that surfaces it).
 
 **Open governance gap** (not resolved by this task — see `IMPLEMENTATION_GAP_ANALYSIS.md`
-Discrepancy 7 / `EVENT_COMPATIBILITY_REPORT.md`'s "Governance gap" section): `TenantMembershipRemoved`
+Discrepancy 7 / `EVENT_COMPATIBILITY_REPORT.md`'s "Governance gap" section): `MembershipRevoked`
 has not been run through `iam-org-membership`'s `platform-schemagov` pipeline, and that repo's own
 `api/asyncapi.yaml` (its real schema source of truth) does not yet document the event. The event
 works correctly today — verified end-to-end against real Postgres in both repos' test suites — but
@@ -366,7 +366,7 @@ flowchart TD
     end
 
     subgraph offboard["Tenant Offboarding Cascade"]
-        O1([TenantOffboarded consumed]) --> O2["DELETE FROM tender_acl_entries\nWHERE tenant_id=$1"]
+        O1([TenantMembershipsPurged consumed]) --> O2["DELETE FROM tender_acl_entries\nWHERE tenant_id=$1"]
         O2 --> O3["No cache invalidation performed here —\nany cached tac:acl:* entries for the\noffboarded tenant simply expire within 30s"]
     end
 

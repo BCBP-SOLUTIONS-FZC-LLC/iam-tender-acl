@@ -60,7 +60,7 @@ workflow gates on this.
 | `409 duplicate_grant` on Grant | An active (non-revoked) grant already exists for that `(tenant, tender, user)` — TAE-1's partial unique index is doing its job; revoke first if replacing it. |
 | TAC-4 returns stale `has_access` briefly after a Revoke | Expected — up to the time between commit and the cache `DEL` call, bounded by the 30s TTL as a hard ceiling. Not a bug unless it persists past 30s. |
 | `/readyz` reports `postgres_pool` degraded but pod stays up | Check `checks.postgres_pool.utilization` — if near 1.0, raise `PG_MAX_CONNS` or investigate a connection leak; the pod isn't failed out solely for pool pressure. |
-| A `TenantOffboarded`/`TenantMembershipRemoved` event seems to run twice | Check `processed_events` for that `(event_id, consumer)` — if absent both times, the idempotency ledger itself may be down (check `checks.postgres`); if present, this is expected SQS at-least-once delivery being correctly deduped, not a bug. |
+| A `TenantMembershipsPurged`/`MembershipRevoked` event seems to run twice | Check `processed_events` for that `(event_id, consumer)` — if absent both times, the idempotency ledger itself may be down (check `checks.postgres`); if present, this is expected SQS at-least-once delivery being correctly deduped, not a bug. |
 | `go-arch-lint` fails after a new import | You've introduced a dependency `.go-arch-lint.yml` doesn't allow (e.g. `core/service` importing an adapter directly) — fix the import direction, don't add an exception without a real architectural reason. |
 | gopls reports a stale `go.mod` error after `make tidy` | Restart the language server — verify first with `go list -m all` / `go mod edit -fmt` that `go.mod` is actually valid before assuming a real problem. |
 
@@ -95,4 +95,6 @@ workflow gates on this.
 | `internal_server_error` | 500 | unclassified failure |
 
 ---
-Document reflects `iam-tender-acl` as of 2026-08-20 (ADR-0007 Wave 3, Phase 1 complete).
+Document reflects `iam-tender-acl` as of 2026-08-25 (ADR-0007 Wave 3: Phases 1–3, 6–7 executed;
+Phases 4–5 partially executed — see `MIGRATION_RUNBOOK.md` for what's real vs. not executable in
+this workspace. This service has never been deployed to a real staging/production environment.)

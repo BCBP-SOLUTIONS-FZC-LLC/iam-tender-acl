@@ -43,7 +43,8 @@
 
 ## Tenant-offboarding cascade (`OffboardingConsumer`)
 
-`TenantOffboarded` event → own span `OffboardingConsumer.Handle`:
+`TenantMembershipsPurged` event (Core's rename of its former `TenantOffboarded`, ADR-0008) → own
+span `OffboardingConsumer.Handle`:
 
 1. Idempotency check-before: `processedEvents.IsProcessed(ctx, eventID)` (consumer
    `tenant_lifecycle_cleanup`) — if already processed, ack and skip.
@@ -59,7 +60,8 @@
 
 ## Member-removal cascade (`MemberRemovalConsumer`, ADR-0007 Wave 3 Phase 3)
 
-`TenantMembershipRemoved` event → own span `MemberRemovalConsumer.Handle`:
+`MembershipRevoked` event (Core's rename/consolidation of its former `TenantMembershipRemoved`,
+ADR-0008) → own span `MemberRemovalConsumer.Handle`:
 
 1. Same idempotency check-before/mark-after pattern, consumer `member_removal` — independent
    ledger entries from the offboarding consumer (composite PK `(event_id, consumer)`), so the two
