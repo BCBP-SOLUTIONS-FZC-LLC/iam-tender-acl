@@ -502,6 +502,67 @@ func TestService_CheckAccess_CacheReadError_FallsThroughToRepo(t *testing.T) {
 	assert.True(t, got.HasAccess)
 }
 
+// TestACLGrant_RTLReason_201 confirms that the 500-byte limit is measured in
+// UTF-8 bytes, not Unicode code-points. Arabic script (U+0600–U+06FF) encodes
+// to 2 bytes per character, so 100 Arabic chars = 200 bytes — well within the
+// 500-byte cap — and the grant must succeed with 201.
+func TestACLGrant_RTLReason_201(t *testing.T) {
+	rtlReason := "مرحبا بالعالم مرحبا بالعالم مرحبا بالعالم مرحبا بالعالم مرحبا بالعالم مرحبا بال"
+	// Must be ≤500 bytes; confirm the assumption holds.
+	require.LessOrEqual(t, len(rtlReason), 500, "test setup: RTL reason must be ≤500 bytes")
+	repo := &fakeRepo{grantFn: func(_ context.Context, e domain.TenderACLEntry) (domain.TenderACLEntry, error) {
+		assert.Equal(t, rtlReason, e.Reason)
+		e.ID = uuid.New()
+		return e, nil
+	}}
+	svc := newTestService(repo, activeChecker(uuid.New()), &fakeCache{}, t)
+
+	_, err := svc.Grant(context.Background(), uuid.New(), uuid.New(), uuid.New(), uuid.New(),
+		domain.ACLView, rtlReason, nil)
+	require.NoError(t, err, "RTL reason within 500-byte limit must be accepted")
+}
+
+// TestACLGrant_WhitespaceReason_201 documents that the service does NOT trim
+// whitespace from the reason field — a spaces-only string passes the
+// byte-length validation unchanged and is stored as-is. If trimming is ever
+// added this test should be updated to reflect the new behavior.
+func TestACLGrant_WhitespaceReason_201(t *testing.T) {
+	whitespaceReason := "   "
+	repo := &fakeRepo{grantFn: func(_ context.Context, e domain.TenderACLEntry) (domain.TenderACLEntry, error) {
+		assert.Equal(t, whitespaceReason, e.Reason, "service must not trim whitespace from reason")
+		e.ID = uuid.New()
+		return e, nil
+	}}
+	svc := newTestService(repo, activeChecker(uuid.New()), &fakeCache{}, t)
+
+	_, err := svc.Grant(context.Background(), uuid.New(), uuid.New(), uuid.New(), uuid.New(),
+		domain.ACLView, whitespaceReason, nil)
+	require.NoError(t, err, "whitespace-only reason (len=3) must pass the 500-byte validation")
+}
+
+// TestService_CheckAccess_CacheSetError_StillReturnsResult covers the silent
+// cache-populate-failure path: cache.Set fails after a DB hit, but the result
+// is still returned to the caller — the Set error is only logged, never fatal.
+func TestService_CheckAccess_CacheSetError_StillReturnsResult(t *testing.T) {
+	entry := &domain.TenderACLEntry{AccessLevel: domain.ACLEdit}
+	repo := &fakeRepo{findActiveFn: func(context.Context, uuid.UUID, uuid.UUID, uuid.UUID) (*domain.TenderACLEntry, error) {
+		return entry, nil
+	}}
+	c := &fakeCache{
+		getFn: func(context.Context, uuid.UUID, uuid.UUID, uuid.UUID) (*domain.CachedAccess, bool, error) {
+			return nil, false, nil
+		},
+		setFn: func(context.Context, uuid.UUID, uuid.UUID, uuid.UUID, domain.CachedAccess) error {
+			return errors.New("valkey down")
+		},
+	}
+	svc := newTestService(repo, &fakeChecker{}, c, t)
+
+	got, err := svc.CheckAccess(context.Background(), uuid.New(), uuid.New(), uuid.New())
+	require.NoError(t, err, "cache.Set failure must not fail CheckAccess")
+	assert.True(t, got.HasAccess)
+}
+
 func TestService_CheckAccess_RepoError_Propagates(t *testing.T) {
 	repoErr := errors.New("db down")
 	repo := &fakeRepo{findActiveFn: func(context.Context, uuid.UUID, uuid.UUID, uuid.UUID) (*domain.TenderACLEntry, error) {

@@ -119,9 +119,36 @@ func TestHTTPChecker_Exists_Timeout_ReturnsError(t *testing.T) {
 	require.Error(t, err)
 }
 
+// TestHTTPChecker_Exists_ActiveWithNoMembershipID covers the branch where the
+// response is active:true but tenant_membership_id is omitted — the client
+// must return (true, zero-UUID, nil) rather than an error.
+func TestHTTPChecker_Exists_ActiveWithNoMembershipID(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		// active:true but NO tenant_membership_id field
+		_, _ = w.Write([]byte(`{"active":true}`))
+	}))
+	defer server.Close()
+
+	checker := NewHTTPChecker(server.URL, nil, 0)
+	active, membershipID, err := checker.Exists(t.Context(), uuid.New(), uuid.New())
+	require.NoError(t, err)
+	assert.True(t, active)
+	assert.Equal(t, uuid.UUID{}, membershipID, "no membership ID in response → zero UUID")
+}
+
 func TestHTTPChecker_Exists_NetworkError_ReturnsError(t *testing.T) {
 	// Nothing listening on this port.
 	checker := NewHTTPChecker("http://127.0.0.1:1", nil, 50*time.Millisecond)
+	_, _, err := checker.Exists(t.Context(), uuid.New(), uuid.New())
+	require.Error(t, err)
+}
+
+// TestHTTPChecker_Exists_InvalidURL_ReturnsError covers the
+// http.NewRequestWithContext error path — a URL containing a control
+// character is malformed and the request cannot be built.
+func TestHTTPChecker_Exists_InvalidURL_ReturnsError(t *testing.T) {
+	checker := NewHTTPChecker("http://invalid\x00host", nil, 50*time.Millisecond)
 	_, _, err := checker.Exists(t.Context(), uuid.New(), uuid.New())
 	require.Error(t, err)
 }

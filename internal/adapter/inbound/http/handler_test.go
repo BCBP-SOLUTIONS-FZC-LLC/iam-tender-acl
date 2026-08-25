@@ -3,11 +3,13 @@ package http
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/gin-gonic/gin"
@@ -239,6 +241,15 @@ func TestHandler_Grant_InvalidTenantID_Returns400(t *testing.T) {
 	assertErrorCode(t, w, http.StatusBadRequest, domain.ErrCodeInvalidRequest)
 }
 
+func TestHandler_Grant_InvalidTenderID_Returns400(t *testing.T) {
+	h := newTestHandler(emptyRepo(), &fakeChecker{}, &fakeCache{}, t)
+	tenant := uuid.New()
+	c, w := buildCtx(http.MethodPost, "/", grantBody(uuid.New()), tenderAdminCtx(tenant))
+	setParams(c, "id", tenant.String(), "tender_id", "not-a-uuid")
+	h.Grant(c)
+	assertErrorCode(t, w, http.StatusBadRequest, domain.ErrCodeInvalidRequest)
+}
+
 func TestHandler_Grant_PlainMember_Returns403(t *testing.T) {
 	h := newTestHandler(emptyRepo(), &fakeChecker{}, &fakeCache{}, t)
 	tenant := uuid.New()
@@ -426,6 +437,42 @@ func TestHandler_Revoke_TenderAdmin_Returns204(t *testing.T) {
 	assert.Equal(t, http.StatusNoContent, c.Writer.Status())
 }
 
+// TestACLGrant_RecordVersion_InitiallyZero verifies the PEND-RECORDVERSION-01
+// contract: a freshly-created ACL entry starts with record_version=0. The
+// caller must echo this value back in subsequent Revoke calls (LLD §8.4/
+// §11.2). The DB trigger bumps the version on every UPDATE, so a fresh row's
+// version is always 0.
+func TestACLGrant_RecordVersion_InitiallyZero(t *testing.T) {
+	h := newTestHandler(emptyRepo(), activeChecker(uuid.New()), &fakeCache{}, t)
+	tenant := uuid.New()
+	c, w := buildCtx(http.MethodPost, "/", grantBody(uuid.New()), tenderAdminCtx(tenant))
+	setParams(c, "id", tenant.String(), "tender_id", uuid.New().String())
+	h.Grant(c)
+	require.Equal(t, http.StatusCreated, w.Code)
+	var body ACLResponse
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &body))
+	assert.Equal(t, int64(0), body.RecordVersion, "fresh grant must have record_version=0 (LLD §8.4)")
+}
+
+// TestACLGrant_NoContentType verifies that gin's ShouldBindJSON does NOT
+// inspect the Content-Type header — a valid JSON body without Content-Type
+// still binds correctly and produces 201. This is gin's documented behavior
+// (ShouldBindJSON always parses as JSON regardless of Content-Type).
+func TestACLGrant_NoContentType(t *testing.T) {
+	h := newTestHandler(emptyRepo(), activeChecker(uuid.New()), &fakeCache{}, t)
+	tenant := uuid.New()
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	// Deliberately omit Content-Type header.
+	req := httptest.NewRequest(http.MethodPost, "/", strings.NewReader(grantBody(uuid.New())))
+	rc := tenderAdminCtx(tenant)
+	req = req.WithContext(WithContext(req.Context(), rc))
+	c.Request = req
+	setParams(c, "id", tenant.String(), "tender_id", uuid.New().String())
+	h.Grant(c)
+	assert.Equal(t, http.StatusCreated, w.Code)
+}
+
 // TestHandler_Revoke_VersionConflict_Returns409 covers the optimistic-lock
 // contract at the handler layer (LLD §11.2/§12.1): a repo reporting zero
 // rows affected — whether from a stale version or an already-revoked row —
@@ -441,4 +488,223 @@ func TestHandler_Revoke_VersionConflict_Returns409(t *testing.T) {
 	setParams(c, "id", tenant.String(), "tender_id", uuid.New().String(), "user_id", uuid.New().String())
 	h.Revoke(c)
 	assertErrorCode(t, w, http.StatusConflict, domain.ErrCodeOptimisticLockConflict)
+}
+
+// ── respondACLError — all switch branches ─────────────────────────────────────
+
+func callRespondACLError(t *testing.T, err error) *httptest.ResponseRecorder {
+	t.Helper()
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Request = httptest.NewRequest(http.MethodGet, "/", http.NoBody)
+	respondACLError(c, err)
+	return w
+}
+
+func TestRespondACLError_NoDomainCode_Returns500(t *testing.T) {
+	w := callRespondACLError(t, errors.New("plain error"))
+	assertErrorCode(t, w, http.StatusInternalServerError, domain.ErrCodeInternal)
+}
+
+func TestRespondACLError_InvalidRequest_400(t *testing.T) {
+	w := callRespondACLError(t, domain.NewError(domain.ErrCodeInvalidRequest, "bad"))
+	assertErrorCode(t, w, http.StatusBadRequest, domain.ErrCodeInvalidRequest)
+}
+
+func TestRespondACLError_Unauthorized_401(t *testing.T) {
+	w := callRespondACLError(t, domain.NewError(domain.ErrCodeUnauthorized, "unauth"))
+	assertErrorCode(t, w, http.StatusUnauthorized, domain.ErrCodeUnauthorized)
+}
+
+func TestRespondACLError_InsufficientRole_403(t *testing.T) {
+	w := callRespondACLError(t, domain.NewError(domain.ErrCodeInsufficientRole, "role"))
+	assertErrorCode(t, w, http.StatusForbidden, domain.ErrCodeInsufficientRole)
+}
+
+func TestRespondACLError_InvalidReason_422(t *testing.T) {
+	w := callRespondACLError(t, domain.NewError(domain.ErrCodeInvalidReason, "reason"))
+	assertErrorCode(t, w, http.StatusUnprocessableEntity, domain.ErrCodeInvalidReason)
+}
+
+func TestRespondACLError_InvalidExpiry_422(t *testing.T) {
+	w := callRespondACLError(t, domain.NewError(domain.ErrCodeInvalidExpiry, "expiry"))
+	assertErrorCode(t, w, http.StatusUnprocessableEntity, domain.ErrCodeInvalidExpiry)
+}
+
+func TestRespondACLError_DependencyUnavailable_503(t *testing.T) {
+	w := callRespondACLError(t, domain.NewError(domain.ErrCodeDependencyUnavailable, "dep"))
+	assertErrorCode(t, w, http.StatusServiceUnavailable, domain.ErrCodeDependencyUnavailable)
+}
+
+func TestRespondACLError_UnknownCode_500(t *testing.T) {
+	// A domain error whose code matches no switch case → default 500.
+	w := callRespondACLError(t, domain.NewError("unknown_future_code", "unknown"))
+	assert.Equal(t, http.StatusInternalServerError, w.Code)
+}
+
+// ── List service error ────────────────────────────────────────────────────────
+
+func TestHandler_List_ServiceError_PropagatesError(t *testing.T) {
+	repo := emptyRepo()
+	repo.listFn = func(context.Context, uuid.UUID, uuid.UUID) ([]domain.TenderACLEntry, error) {
+		return nil, domain.NewError(domain.ErrCodeDependencyUnavailable, "db down")
+	}
+	h := newTestHandler(repo, &fakeChecker{}, &fakeCache{}, t)
+	tenant := uuid.New()
+	c, w := buildCtx(http.MethodGet, "/", "", tenderAdminCtx(tenant))
+	setParams(c, "id", tenant.String(), "tender_id", uuid.New().String())
+	h.List(c)
+	assertErrorCode(t, w, http.StatusServiceUnavailable, domain.ErrCodeDependencyUnavailable)
+}
+
+// ── toACLResponses empty slice ────────────────────────────────────────────────
+
+func TestToACLResponses_EmptySlice_ReturnsEmptySliceNotNil(t *testing.T) {
+	result := toACLResponses([]domain.TenderACLEntry{})
+	require.NotNil(t, result)
+	assert.Len(t, result, 0)
+}
+
+// ── TAC2-DEP-02: membership check timeout → 503 ───────────────────────────────
+
+// TestACLGrant_MembershipTimeout_503 covers TAC2-DEP-02: the membership
+// checker returns context.DeadlineExceeded (simulating the 300ms
+// MEMBERSHIP_CHECK_TIMEOUT_MS firing) → service maps to ErrCodeCoreUnavailable
+// → handler returns 503. repo.Grant is never called (fail-closed).
+func TestACLGrant_MembershipTimeout_503(t *testing.T) {
+	checker := &fakeChecker{existsFn: func(_ context.Context, _, _ uuid.UUID) (bool, uuid.UUID, error) {
+		return false, uuid.Nil, context.DeadlineExceeded
+	}}
+	h := newTestHandler(emptyRepo(), checker, &fakeCache{}, t)
+	tenant := uuid.New()
+	c, w := buildCtx(http.MethodPost, "/", grantBody(uuid.New()), tenderAdminCtx(tenant))
+	setParams(c, "id", tenant.String(), "tender_id", uuid.New().String())
+	h.Grant(c)
+	assertErrorCode(t, w, http.StatusServiceUnavailable, domain.ErrCodeCoreUnavailable)
+}
+
+// ── CONC-GRANT-01: concurrent grants → one 201, one 409 ─────────────────────
+
+// TestACLGrant_Concurrent_OneSucceedsOneFails covers CONC-GRANT-01: two
+// goroutines race to grant the same (tenant, tender, user). The mock repo
+// serializes via a mutex — first caller succeeds, second gets DuplicateGrant.
+// Exactly one 201 and one 409 must be observed (mirrors DB unique-index
+// serialization on uq_tae_active_entry).
+func TestACLGrant_Concurrent_OneSucceedsOneFails(t *testing.T) {
+	var mu sync.Mutex
+	grantCalls := 0
+	repo := &fakeRepo{
+		grantFn: func(_ context.Context, e domain.TenderACLEntry) (domain.TenderACLEntry, error) {
+			mu.Lock()
+			defer mu.Unlock()
+			if grantCalls > 0 {
+				return domain.TenderACLEntry{}, domain.NewError(domain.ErrCodeDuplicateGrant, "duplicate grant")
+			}
+			grantCalls++
+			e.ID = uuid.New()
+			return e, nil
+		},
+		listFn:   func(context.Context, uuid.UUID, uuid.UUID) ([]domain.TenderACLEntry, error) { return nil, nil },
+		revokeFn: func(context.Context, uuid.UUID, uuid.UUID, uuid.UUID, int64) error { return nil },
+	}
+	tenant, tender, user := uuid.New(), uuid.New(), uuid.New()
+	checker := activeChecker(uuid.New())
+
+	codes := make([]int, 2)
+	var wg sync.WaitGroup
+	for i := range codes {
+		wg.Add(1)
+		go func(idx int) {
+			defer wg.Done()
+			h := newTestHandler(repo, checker, &fakeCache{}, t)
+			c, w := buildCtx(http.MethodPost, "/", grantBody(user), tenderAdminCtx(tenant))
+			setParams(c, "id", tenant.String(), "tender_id", tender.String())
+			h.Grant(c)
+			codes[idx] = w.Code
+		}(i)
+	}
+	wg.Wait()
+
+	assert.ElementsMatch(t, []int{http.StatusCreated, http.StatusConflict}, codes)
+}
+
+// ── CONC-REVOKE-01: concurrent revokes → both 204 ───────────────────────────
+
+// TestACLRevoke_Concurrent_BothSucceed covers CONC-REVOKE-01: two goroutines
+// revoke the same entry simultaneously. The repo returns nil for both (the
+// real DB UPDATE is idempotent — second hits 0 rows, service returns nil).
+// Both must receive 204 No Content.
+// Note: c.Status(204) only sets gin's internal status — use c.Writer.Status()
+// not w.Code, because no body write flushes the header to the recorder.
+func TestACLRevoke_Concurrent_BothSucceed(t *testing.T) {
+	repo := &fakeRepo{
+		revokeFn: func(context.Context, uuid.UUID, uuid.UUID, uuid.UUID, int64) error { return nil },
+		listFn:   func(context.Context, uuid.UUID, uuid.UUID) ([]domain.TenderACLEntry, error) { return nil, nil },
+	}
+	tenant, tender, user := uuid.New(), uuid.New(), uuid.New()
+
+	statuses := make([]int, 2)
+	var wg sync.WaitGroup
+	for i := range statuses {
+		wg.Add(1)
+		go func(idx int) {
+			defer wg.Done()
+			h := newTestHandler(repo, &fakeChecker{}, &fakeCache{}, t)
+			c, _ := buildCtx(http.MethodDelete, "/", revokeBody(1), tenderAdminCtx(tenant))
+			setParams(c, "id", tenant.String(), "tender_id", tender.String(), "user_id", user.String())
+			h.Revoke(c)
+			statuses[idx] = c.Writer.Status()
+		}(i)
+	}
+	wg.Wait()
+
+	assert.Equal(t, http.StatusNoContent, statuses[0])
+	assert.Equal(t, http.StatusNoContent, statuses[1])
+}
+
+// ── CONC-GRANT-REVOKE-01: concurrent grant + revoke → no orphan ─────────────
+
+// TestACLGrant_Revoke_Concurrent covers CONC-GRANT-REVOKE-01: one goroutine
+// grants, one revokes the same entry simultaneously. The mock repo succeeds
+// for both operations. The test verifies no deadlock and both operations
+// return valid status codes (grant 201, revoke 204).
+func TestACLGrant_Revoke_Concurrent(t *testing.T) {
+	repo := &fakeRepo{
+		grantFn: func(_ context.Context, e domain.TenderACLEntry) (domain.TenderACLEntry, error) {
+			e.ID = uuid.New()
+			return e, nil
+		},
+		revokeFn: func(context.Context, uuid.UUID, uuid.UUID, uuid.UUID, int64) error { return nil },
+		listFn:   func(context.Context, uuid.UUID, uuid.UUID) ([]domain.TenderACLEntry, error) { return nil, nil },
+	}
+	tenant, tender, user := uuid.New(), uuid.New(), uuid.New()
+	checker := activeChecker(uuid.New())
+
+	var wg sync.WaitGroup
+	var grantCode, revokeCode int
+
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		h := newTestHandler(repo, checker, &fakeCache{}, t)
+		c, w := buildCtx(http.MethodPost, "/", grantBody(user), tenderAdminCtx(tenant))
+		setParams(c, "id", tenant.String(), "tender_id", tender.String())
+		h.Grant(c)
+		grantCode = w.Code
+	}()
+
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		h := newTestHandler(repo, &fakeChecker{}, &fakeCache{}, t)
+		c, _ := buildCtx(http.MethodDelete, "/", revokeBody(1), tenderAdminCtx(tenant))
+		setParams(c, "id", tenant.String(), "tender_id", tender.String(), "user_id", user.String())
+		h.Revoke(c)
+		revokeCode = c.Writer.Status() // 204 with no body: use gin's internal status
+	}()
+
+	wg.Wait()
+
+	assert.Equal(t, http.StatusCreated, grantCode)
+	assert.Equal(t, http.StatusNoContent, revokeCode)
 }

@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"net/http"
+	"sync"
+	"sync/atomic"
 	"testing"
 
 	"github.com/google/uuid"
@@ -76,6 +78,62 @@ func TestInternalHandler_CheckAccess_NoRoleCheckRequired(t *testing.T) {
 	setParams(c, "id", uuid.New().String(), "tender_id", uuid.New().String(), "user_id", uuid.New().String())
 	h.CheckAccess(c)
 	assert.Equal(t, http.StatusOK, w.Code)
+}
+
+func TestInternalHandler_CheckAccess_InvalidTenantID_Returns400(t *testing.T) {
+	h := newTestHandler(&fakeRepo{}, &fakeChecker{}, &fakeCache{}, t)
+	c, w := buildCtx(http.MethodGet, "/", ``, nil)
+	setParams(c, "id", "not-a-uuid", "tender_id", uuid.New().String(), "user_id", uuid.New().String())
+	h.CheckAccess(c)
+	assertErrorCode(t, w, http.StatusBadRequest, domain.ErrCodeInvalidRequest)
+}
+
+func TestInternalHandler_CheckAccess_InvalidTenderID_Returns400(t *testing.T) {
+	h := newTestHandler(&fakeRepo{}, &fakeChecker{}, &fakeCache{}, t)
+	c, w := buildCtx(http.MethodGet, "/", ``, nil)
+	setParams(c, "id", uuid.New().String(), "tender_id", "not-a-uuid", "user_id", uuid.New().String())
+	h.CheckAccess(c)
+	assertErrorCode(t, w, http.StatusBadRequest, domain.ErrCodeInvalidRequest)
+}
+
+// ── CONC-CHECK-CACHE-01: thundering herd on cache miss ───────────────────────
+
+// TestACLCheckAccess_ThunderingHerd covers CONC-CHECK-CACHE-01: many
+// goroutines call CheckAccess simultaneously on a cold cache (cache.Get
+// always misses). All goroutines must receive the correct 200 has_access:true
+// answer. cache.Set races are benign (last write wins, identical value).
+func TestACLCheckAccess_ThunderingHerd(t *testing.T) {
+	const workers = 20
+	entry := &domain.TenderACLEntry{AccessLevel: domain.ACLView}
+	var findCalls atomic.Int32
+	repo := &fakeRepo{findActiveFn: func(context.Context, uuid.UUID, uuid.UUID, uuid.UUID) (*domain.TenderACLEntry, error) {
+		findCalls.Add(1)
+		return entry, nil
+	}}
+	cache := &fakeCache{getFn: func(context.Context, uuid.UUID, uuid.UUID, uuid.UUID) (*domain.CachedAccess, bool, error) {
+		return nil, false, nil // always miss
+	}}
+	h := newTestHandler(repo, &fakeChecker{}, cache, t)
+	tenant, tender, user := uuid.New(), uuid.New(), uuid.New()
+
+	var successes atomic.Int32
+	var wg sync.WaitGroup
+	for range workers {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			c, w := buildCtx(http.MethodGet, "/", ``, nil)
+			setParams(c, "id", tenant.String(), "tender_id", tender.String(), "user_id", user.String())
+			h.CheckAccess(c)
+			if w.Code == http.StatusOK {
+				successes.Add(1)
+			}
+		}()
+	}
+	wg.Wait()
+
+	assert.Equal(t, int32(workers), successes.Load(), "all goroutines must receive 200 has_access:true")
+	assert.Equal(t, int32(workers), findCalls.Load(), "cache miss → all workers fall through to repo")
 }
 
 func TestInternalHandler_CheckAccess_UnwrappedRepoError_Returns500(t *testing.T) {

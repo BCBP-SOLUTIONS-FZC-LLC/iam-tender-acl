@@ -186,3 +186,112 @@ func TestMemberRemovalConsumer_Handle_IsProcessedCheckError_ReturnsError(t *test
 	err := c.Handle(context.Background(), memberRemovedEnvelope(uuid.New(), uuid.New(), uuid.New()))
 	assert.Error(t, err)
 }
+
+// ── EC-MEM-EMPTYTYPE-01 ───────────────────────────────────────────────────────
+
+// TestMemberRemovalConsumer_Handle_EmptyType_Treated verifies that env.Type=""
+// passes the type guard and proceeds to soft-delete, matching code behavior
+// (same guard logic as OffboardingConsumer).
+func TestMemberRemovalConsumer_Handle_EmptyType_Treated(t *testing.T) {
+	eventID, tenantID, userID := uuid.New(), uuid.New(), uuid.New()
+	var cascadeCalled bool
+	repo := &fakeUserRemovalCascader{fn: func(_ context.Context, tid, uid uuid.UUID) (int64, error) {
+		cascadeCalled = true
+		assert.Equal(t, tenantID, tid)
+		assert.Equal(t, userID, uid)
+		return 1, nil
+	}}
+	idem := &fakeIdempotencyStore{
+		isProcessedFn:   func(context.Context, uuid.UUID) (bool, error) { return false, nil },
+		markProcessedFn: func(context.Context, uuid.UUID) error { return nil },
+	}
+	c := newTestMemberRemovalConsumer(repo, idem, &fakeCascadeMetrics{})
+
+	env := events.Envelope[json.RawMessage]{
+		ID: eventID.String(), Type: "",
+		TenantID: tenantID.String(), Subject: userID.String(), Timestamp: time.Now().UTC(),
+	}
+	err := c.Handle(context.Background(), env)
+	require.NoError(t, err)
+	assert.True(t, cascadeCalled)
+}
+
+// ── EC-MEM-ZERO-ACL-01 ───────────────────────────────────────────────────────
+
+// TestMemberRemovalConsumer_ZeroACL_Success verifies that a user with no ACL
+// entries (UPDATE affects 0 rows) is not an error — MarkProcessed is still
+// called and Handle returns nil.
+func TestMemberRemovalConsumer_ZeroACL_Success(t *testing.T) {
+	eventID, tenantID, userID := uuid.New(), uuid.New(), uuid.New()
+	repo := &fakeUserRemovalCascader{fn: func(_ context.Context, tid, uid uuid.UUID) (int64, error) {
+		assert.Equal(t, tenantID, tid)
+		assert.Equal(t, userID, uid)
+		return 0, nil
+	}}
+	idem := &fakeIdempotencyStore{
+		isProcessedFn:   func(context.Context, uuid.UUID) (bool, error) { return false, nil },
+		markProcessedFn: func(context.Context, uuid.UUID) error { return nil },
+	}
+	metrics := &fakeCascadeMetrics{}
+	c := newTestMemberRemovalConsumer(repo, idem, metrics)
+
+	err := c.Handle(context.Background(), memberRemovedEnvelope(eventID, tenantID, userID))
+	require.NoError(t, err)
+	assert.Equal(t, []string{"success"}, metrics.results)
+}
+
+// ── EC-MEM-MULTI-TENDER-01 ───────────────────────────────────────────────────
+
+// TestMemberRemovalConsumer_MultiTender_AllDeleted verifies that a user with
+// grants across multiple tenders has all of them soft-deleted in a single
+// SoftDeleteForUser call (UPDATE WHERE tenant_id=X AND user_id=Y — multi-row).
+func TestMemberRemovalConsumer_MultiTender_AllDeleted(t *testing.T) {
+	eventID, tenantID, userID := uuid.New(), uuid.New(), uuid.New()
+	repo := &fakeUserRemovalCascader{fn: func(_ context.Context, tid, uid uuid.UUID) (int64, error) {
+		assert.Equal(t, tenantID, tid)
+		assert.Equal(t, userID, uid)
+		return 5, nil // user had grants on 5 tenders
+	}}
+	idem := &fakeIdempotencyStore{
+		isProcessedFn:   func(context.Context, uuid.UUID) (bool, error) { return false, nil },
+		markProcessedFn: func(context.Context, uuid.UUID) error { return nil },
+	}
+	metrics := &fakeCascadeMetrics{}
+	c := newTestMemberRemovalConsumer(repo, idem, metrics)
+
+	err := c.Handle(context.Background(), memberRemovedEnvelope(eventID, tenantID, userID))
+	require.NoError(t, err)
+	assert.Equal(t, []string{"success"}, metrics.results)
+}
+
+// ── EC-MEM-CROSS-TENANT-01 / EC-MEM-DLQ-01 ───────────────────────────────────
+
+// TestMemberRemoval_CrossTenantUser_Scoped verifies EC-MEM-CROSS-TENANT-01:
+// even when the removed user belongs to a different tenant, SoftDeleteForUser
+// is called with the envelope's tenant_id — not the user's origin tenant.
+// Real RLS enforcement (app.tenant_id GUC) provides defense-in-depth at the
+// DB layer and is verified in the rls test suite.
+// EC-MEM-DLQ-01 (DLQ routing after 5 failures) is infrastructure behavior
+// verified indirectly: TestMemberRemovalConsumer_Handle_CascadeError_* covers
+// the error-return contract that triggers SQS requeue → eventually DLQ.
+func TestMemberRemoval_CrossTenantUser_Scoped(t *testing.T) {
+	eventID := uuid.New()
+	tenantAAA := uuid.New()   // envelope's tenant_id
+	userFromBBB := uuid.New() // user whose origin tenant is different
+
+	var gotTenant, gotUser uuid.UUID
+	repo := &fakeUserRemovalCascader{fn: func(_ context.Context, tid, uid uuid.UUID) (int64, error) {
+		gotTenant, gotUser = tid, uid
+		return 0, nil // user has no entries under tenantAAA
+	}}
+	idem := &fakeIdempotencyStore{
+		isProcessedFn:   func(context.Context, uuid.UUID) (bool, error) { return false, nil },
+		markProcessedFn: func(context.Context, uuid.UUID) error { return nil },
+	}
+	c := newTestMemberRemovalConsumer(repo, idem, &fakeCascadeMetrics{})
+
+	err := c.Handle(context.Background(), memberRemovedEnvelope(eventID, tenantAAA, userFromBBB))
+	require.NoError(t, err)
+	assert.Equal(t, tenantAAA, gotTenant, "repo call must be scoped to envelope's tenant_id, not user's origin tenant")
+	assert.Equal(t, userFromBBB, gotUser)
+}

@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"errors"
 	"log/slog"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -186,4 +188,151 @@ func TestConsumer_Handle_IsProcessedCheckError_ReturnsError(t *testing.T) {
 
 	err := c.Handle(context.Background(), offboardedEnvelope(uuid.New(), uuid.New()))
 	assert.Error(t, err)
+}
+
+// ── EC-OFF-EMPTYTYPE-01 ───────────────────────────────────────────────────────
+
+// TestConsumer_Handle_EmptyType_TreatedAsOffboarded verifies that an envelope
+// with env.Type="" passes the type guard
+// (`env.Type != "" && env.Type != "TenantOffboarded"` → first condition false
+// → whole guard false) and proceeds to cascade, matching code behavior.
+func TestConsumer_Handle_EmptyType_TreatedAsOffboarded(t *testing.T) {
+	eventID, tenantID := uuid.New(), uuid.New()
+	var cascadeCalled bool
+	repo := &fakeCascadeDeleter{fn: func(_ context.Context, tid uuid.UUID) (int64, error) {
+		cascadeCalled = true
+		assert.Equal(t, tenantID, tid)
+		return 2, nil
+	}}
+	idem := &fakeIdempotencyStore{
+		isProcessedFn:   func(context.Context, uuid.UUID) (bool, error) { return false, nil },
+		markProcessedFn: func(context.Context, uuid.UUID) error { return nil },
+	}
+	c := newTestConsumer(repo, idem, &fakeCascadeMetrics{})
+
+	env := events.Envelope[json.RawMessage]{
+		ID: eventID.String(), Type: "",
+		TenantID: tenantID.String(), Timestamp: time.Now().UTC(),
+	}
+	err := c.Handle(context.Background(), env)
+	require.NoError(t, err)
+	assert.True(t, cascadeCalled)
+}
+
+// ── EC-OFF-ZERO-ACL-01 ───────────────────────────────────────────────────────
+
+// TestOffboardingConsumer_ZeroACL_Success verifies that a tenant with zero ACL
+// entries (DELETE affects 0 rows) is not an error — MarkProcessed is still
+// called and Handle returns nil.
+func TestOffboardingConsumer_ZeroACL_Success(t *testing.T) {
+	eventID, tenantID := uuid.New(), uuid.New()
+	repo := &fakeCascadeDeleter{fn: func(_ context.Context, tid uuid.UUID) (int64, error) {
+		assert.Equal(t, tenantID, tid)
+		return 0, nil
+	}}
+	idem := &fakeIdempotencyStore{
+		isProcessedFn:   func(context.Context, uuid.UUID) (bool, error) { return false, nil },
+		markProcessedFn: func(context.Context, uuid.UUID) error { return nil },
+	}
+	metrics := &fakeCascadeMetrics{}
+	c := newTestConsumer(repo, idem, metrics)
+
+	err := c.Handle(context.Background(), offboardedEnvelope(eventID, tenantID))
+	require.NoError(t, err)
+	assert.Equal(t, []string{"success"}, metrics.results)
+}
+
+// ── EC-OFF-LARGE-01 ──────────────────────────────────────────────────────────
+
+// TestOffboardingConsumer_LargeCascade verifies that a tenant with a very large
+// number of ACL entries (100,000+) completes successfully. The single-statement
+// DELETE is handled by Postgres; the mock returns the row count immediately.
+func TestOffboardingConsumer_LargeCascade(t *testing.T) {
+	const rowCount = int64(100_000)
+	eventID, tenantID := uuid.New(), uuid.New()
+	repo := &fakeCascadeDeleter{fn: func(_ context.Context, tid uuid.UUID) (int64, error) {
+		assert.Equal(t, tenantID, tid)
+		return rowCount, nil
+	}}
+	idem := &fakeIdempotencyStore{
+		isProcessedFn:   func(context.Context, uuid.UUID) (bool, error) { return false, nil },
+		markProcessedFn: func(context.Context, uuid.UUID) error { return nil },
+	}
+	metrics := &fakeCascadeMetrics{}
+	c := newTestConsumer(repo, idem, metrics)
+
+	err := c.Handle(context.Background(), offboardedEnvelope(eventID, tenantID))
+	require.NoError(t, err)
+	assert.Equal(t, []string{"success"}, metrics.results)
+}
+
+// ── EC-OFF-DB-DOWN-01 / EC-OFF-DLQ-01 ────────────────────────────────────────
+
+// TestOffboardingConsumer_DBDown_Requeues verifies EC-OFF-DB-DOWN-01: when the
+// DB is unavailable the cascade fails, Handle returns an error (SQS does NOT
+// delete the message → redelivery). After MaxReceiveCount(5) failures SQS
+// routes to the DLQ (EC-OFF-DLQ-01 — infrastructure behavior, verified
+// indirectly here by the error-return contract).
+func TestOffboardingConsumer_DBDown_Requeues(t *testing.T) {
+	eventID, tenantID := uuid.New(), uuid.New()
+	repo := &fakeCascadeDeleter{fn: func(context.Context, uuid.UUID) (int64, error) {
+		return 0, errors.New("db unavailable")
+	}}
+	idem := &fakeIdempotencyStore{
+		isProcessedFn: func(context.Context, uuid.UUID) (bool, error) { return false, nil },
+		markProcessedFn: func(context.Context, uuid.UUID) error {
+			t.Fatal("MarkProcessed must not be called when the cascade fails")
+			return nil
+		},
+	}
+	metrics := &fakeCascadeMetrics{}
+	c := newTestConsumer(repo, idem, metrics)
+
+	err := c.Handle(context.Background(), offboardedEnvelope(eventID, tenantID))
+	require.Error(t, err, "DB down → Handle must return error so SQS requeues → eventually DLQ")
+	assert.Equal(t, []string{"error"}, metrics.results)
+}
+
+// ── CONC-SQS-MULTI-01: two replicas same message → idempotency ───────────────
+
+// TestOffboarding_ConcurrentReplicas_Idempotent covers CONC-SQS-MULTI-01:
+// two consumer replicas receive the same SQS message simultaneously and both
+// call IsProcessed before either transaction commits — both see false. The
+// cascade is idempotent (DELETE is a no-op on already-deleted rows). Both
+// MarkProcessed calls succeed (upsert-style behavior). The test verifies
+// correctness: both handle calls complete without error and the cascade runs
+// for the correct tenant on each replica.
+func TestOffboarding_ConcurrentReplicas_Idempotent(t *testing.T) {
+	eventID, tenantID := uuid.New(), uuid.New()
+
+	var cascadeCalls atomic.Int32
+	repo := &fakeCascadeDeleter{fn: func(_ context.Context, tid uuid.UUID) (int64, error) {
+		cascadeCalls.Add(1)
+		assert.Equal(t, tenantID, tid)
+		return 3, nil
+	}}
+	// Both replicas see IsProcessed=false (simulating the race before
+	// either transaction commits). MarkProcessed uses upsert semantics —
+	// both succeed.
+	idem := &fakeIdempotencyStore{
+		isProcessedFn:   func(context.Context, uuid.UUID) (bool, error) { return false, nil },
+		markProcessedFn: func(context.Context, uuid.UUID) error { return nil },
+	}
+	metrics := &fakeCascadeMetrics{}
+
+	errs := make([]error, 2)
+	var wg sync.WaitGroup
+	for i := range errs {
+		wg.Add(1)
+		go func(idx int) {
+			defer wg.Done()
+			c := newTestConsumer(repo, idem, metrics)
+			errs[idx] = c.Handle(context.Background(), offboardedEnvelope(eventID, tenantID))
+		}(i)
+	}
+	wg.Wait()
+
+	assert.NoError(t, errs[0])
+	assert.NoError(t, errs[1])
+	assert.Equal(t, int32(2), cascadeCalls.Load(), "both replicas cascade (idempotent DELETE)")
 }
