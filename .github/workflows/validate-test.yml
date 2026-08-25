@@ -96,7 +96,7 @@ jobs:
       # adapter/inbound and adapter/outbound depending only on core, never
       # on each other — wired together only from cmd/tender-acl.
       - name: Cache go-arch-lint binary
-        uses: actions/cache@v6.0.0
+        uses: actions/cache@v6.1.0
         with:
           path: ~/go/bin
           key: go-arch-lint-${{ runner.os }}-v1.15.0
