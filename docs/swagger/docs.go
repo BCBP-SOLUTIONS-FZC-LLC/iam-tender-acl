@@ -9,12 +9,12 @@ const docTemplate = `{
     "swagger": "2.0",
     "tags": [
         {
-            "name": "public",
-            "description": "Tenant-admin grant/revoke/list (TAC-1, TAC-2, TAC-3)"
-        },
-        {
             "name": "internal",
             "description": "Mesh-only authorization check (TAC-4/I-12) — no RBAC"
+        },
+        {
+            "name": "public",
+            "description": "Tenant-admin grant/revoke/list (TAC-1, TAC-2, TAC-3)"
         },
         {
             "name": "infra",
@@ -25,7 +25,8 @@ const docTemplate = `{
         "description": "{{escape .Description}}",
         "title": "{{.Title}}",
         "contact": {
-            "name": "BCBP Solutions"
+            "name": "BCBP Solutions",
+            "email": "sharmila.dayalan@bcbpsolutions.com"
         },
         "license": {
             "name": "Proprietary"

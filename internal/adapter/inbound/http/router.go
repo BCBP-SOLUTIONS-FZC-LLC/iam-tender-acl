@@ -2,6 +2,7 @@ package http
 
 import (
 	"net/http"
+	"strings"
 
 	"github.com/gin-gonic/gin"
 
@@ -120,16 +121,37 @@ func registerDocsRoutes(engine *gin.Engine, docs DocsConfig) {
 	if !docs.active() {
 		return
 	}
-	group := engine.Group("/swagger")
-	if docs.Environment == "production" && docs.AuthToken != "" {
-		group.Use(docsAuthMiddleware(docs.AuthToken))
+
+	// Defense-in-depth security headers for the docs surface. Swagger UI
+	// requires 'unsafe-inline' and 'unsafe-eval' for its bundled JS.
+	secHeaders := func(c *gin.Context) {
+		c.Header("X-Frame-Options", "DENY")
+		c.Header("X-Content-Type-Options", "nosniff")
+		c.Header("Content-Security-Policy",
+			"default-src 'self'; script-src 'self' 'unsafe-inline' 'unsafe-eval'; "+
+				"style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self' data:; connect-src 'self'")
+		c.Next()
 	}
-	group.GET("/*any", ginSwagger.WrapHandler(swaggerFiles.Handler))
+
+	var authMiddleware gin.HandlerFunc = func(c *gin.Context) { c.Next() }
+	if docs.Environment == "production" && docs.AuthToken != "" {
+		authMiddleware = docsAuthMiddleware(docs.AuthToken)
+	}
+
+	stdSwagger := ginSwagger.WrapHandler(swaggerFiles.Handler)
+	engine.GET("/swagger/*any", secHeaders, authMiddleware, func(c *gin.Context) {
+		switch {
+		case strings.HasSuffix(c.Request.URL.Path, "/index.css"):
+			SwaggerThemeHandler(c)
+		case strings.HasSuffix(c.Request.URL.Path, "/swagger-initializer.js"):
+			SwaggerInitializerHandler(c)
+		default:
+			stdSwagger(c)
+		}
+	})
 
 	asyncGroup := engine.Group("")
-	if docs.Environment == "production" && docs.AuthToken != "" {
-		asyncGroup.Use(docsAuthMiddleware(docs.AuthToken))
-	}
+	asyncGroup.Use(secHeaders, authMiddleware)
 	asyncGroup.Use(envMiddleware(docs.Environment))
 	asyncGroup.GET("/asyncapi", AsyncAPIHandler)
 	asyncGroup.GET("/asyncapi.yaml", AsyncAPIYAMLHandler)

@@ -3,6 +3,7 @@ package http
 import (
 	"bytes"
 	"context"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -669,4 +670,17 @@ func TestRenderPropsTable_PropertyNotInOrder_StillRendered(t *testing.T) {
 	out := buf.String()
 	assert.Contains(t, out, "name")
 	assert.Contains(t, out, "extra")
+}
+
+func TestAsyncAPIHandler_LoadError_Returns500(t *testing.T) {
+	// Ensure the Once has already fired so our injection is not overwritten.
+	_, _ = loadAsyncSpec()
+
+	prev := asyncSpecErr
+	asyncSpecErr = errors.New("injected spec parse error")
+	t.Cleanup(func() { asyncSpecErr = prev })
+
+	c, w := newTestGinContext()
+	AsyncAPIHandler(c)
+	assert.Equal(t, http.StatusInternalServerError, w.Code)
 }
