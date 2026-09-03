@@ -32,6 +32,8 @@ COPY go.mod go.sum ./
 # github.com/BCBP-SOLUTIONS-FZC-LLC modules (not vendored locally), fetched
 # via git using a short-lived token — same secret-handling pattern as
 # iam-org-membership/iam-catalog-admin's Dockerfiles.
+# hadolint ignore=DL3008 — base image is digest-pinned; apt package versions
+# track Bookworm security updates intentionally, not pegged to a point release.
 RUN apt-get update && apt-get install -y --no-install-recommends git ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
