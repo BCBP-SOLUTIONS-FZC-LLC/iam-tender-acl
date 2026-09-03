@@ -74,8 +74,8 @@ definitions:
     type: object
 info:
   contact:
-    name: BCBP Solutions
     email: sharmila.dayalan@bcbpsolutions.com
+    name: BCBP Solutions
   description: |-
     Restricted-tender access overlay, extracted from iam-org-membership per ADR-0007 Wave 3. Owns exactly one resource — tender_acl_entries — behind three admin-gated grant/revoke/list endpoints and one mesh-only authorization check.
 
@@ -310,10 +310,10 @@ paths:
       tags:
       - infra
 tags:
-- description: Mesh-only authorization check (TAC-4/I-12) — no RBAC
-  name: internal
 - description: Tenant-admin grant/revoke/list (TAC-1, TAC-2, TAC-3)
   name: public
+- description: Mesh-only authorization check (TAC-4/I-12) — no RBAC
+  name: internal
 - description: Health checks (unauthenticated)
   name: infra
 securityDefinitions:
