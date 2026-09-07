@@ -5,7 +5,7 @@ go 1.26.6
 require (
 	github.com/BCBP-SOLUTIONS-FZC-LLC/platform-events v1.4.0
 	github.com/BCBP-SOLUTIONS-FZC-LLC/platform-gincommon v1.3.0
-	github.com/BCBP-SOLUTIONS-FZC-LLC/platform-pgcommon v1.2.1
+	github.com/BCBP-SOLUTIONS-FZC-LLC/platform-pgcommon v1.3.0
 	github.com/gin-gonic/gin v1.12.0
 	github.com/google/uuid v1.6.0
 	github.com/jackc/pgx/v5 v5.10.0
