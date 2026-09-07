@@ -16,6 +16,7 @@ profile.cov
 deploy/
 test/
 scripts/
-docs/
+docs/lld/
+docs/architecture/
 
 *.md
