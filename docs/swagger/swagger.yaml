@@ -74,6 +74,7 @@ definitions:
     type: object
 info:
   contact:
+    email: sharmila.dayalan@bcbpsolutions.com
     name: BCBP Solutions
   description: |-
     Restricted-tender access overlay, extracted from iam-org-membership per ADR-0007 Wave 3. Owns exactly one resource — tender_acl_entries — behind three admin-gated grant/revoke/list endpoints and one mesh-only authorization check.

@@ -10,6 +10,29 @@ impact — they're noted for anyone integrating against it in dev.
 
 ### Added
 
+- BCBP-branded Swagger UI theme (`internal/adapter/inbound/http/swagger_theme.go`) and custom
+  initializer (`swagger_initializer.go`) served inline from the existing `/swagger/*any` route —
+  no additional file-system assets at runtime. Dark theme with gradient accents; preserves
+  model-collapse toggles after expand.
+- Expanded unit test coverage across five packages: `internal/core/port` (`SlogStyleLogger`,
+  `kvToFields`, OTel trace-ID injection), `internal/adapter/outbound/postgres` (`DSNFromEnv`,
+  `ApplyStatementTimeout`, `MigrationDSNFromEnv`, `LoggerAdapter`, `collectEntries` scan-error
+  path), `internal/adapter/outbound/valkey` (constructor coverage), and
+  `internal/adapter/inbound/http` (Swagger theme/initializer handlers, route-switch branches,
+  `Router.Handler()` accessor, `AsyncAPIHandler` 500 error path).
+- Expanded integration test coverage: `repository` (Grant with non-empty `Reason`, trigger-forced
+  INSERT/UPDATE/DELETE errors, table-rename SELECT query errors), `cache` (unmarshal error, marshal
+  error for year > 9999, canceled-context client errors), `consumer` (`ProcessedEvents`
+  `IsProcessed`/`MarkProcessed`/`CleanupExpired` error paths via canceled context).
+
+### Fixed
+
+- `localhost:8086` was accidentally set as the `@host` annotation in `swagger_info.go` and
+  propagated into all three `docs/swagger/` artifacts. Removed so the host is resolved at runtime
+  by the Swagger UI, matching every sibling service.
+- Swagger tag ordering (`public` → `internal` → `infra`) and contact-field ordering
+  (`name`/`email`) stabilised by rerunning `make swag` — no semantic change to the API spec.
+
 - Initial extraction of the Tender ACL Service from `iam-org-membership`, per ADR-0007 Wave 3 and
   `tender-acl-service-lld.md` v2.0.
 - TAC-1/TAC-2/TAC-3 (`GET`/`POST`/`DELETE /api/v1/tenants/:id/tenders/:tender_id/acl[/:user_id]`) —

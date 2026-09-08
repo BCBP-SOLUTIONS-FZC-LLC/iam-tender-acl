@@ -16,3 +16,22 @@ func TestKeyFormat(t *testing.T) {
 	want := "tac:acl:" + tenantID.String() + ":" + tenderID.String() + ":" + userID.String()
 	assert.Equal(t, want, got)
 }
+
+// ── Constructor smoke tests ───────────────────────────────────────────────────
+
+// TestNewClient_ReturnsNonNil verifies that NewClient returns a non-nil
+// *redis.Client without dialing (the client is lazy).
+func TestNewClient_ReturnsNonNil(t *testing.T) {
+	client := NewClient(ClientConfig{Addr: "localhost:6379"})
+	assert.NotNil(t, client)
+	_ = client.Close()
+}
+
+// TestNewCache_ReturnsNonNil verifies that NewCache wraps the client and
+// returns a non-nil *Cache.
+func TestNewCache_ReturnsNonNil(t *testing.T) {
+	client := NewClient(ClientConfig{Addr: "localhost:6379"})
+	cache := NewCache(client)
+	assert.NotNil(t, cache)
+	_ = client.Close()
+}

@@ -280,3 +280,157 @@ func TestRepository_SoftDeleteForUser_Idempotent(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, int64(0), second, "second call must find no active rows left to soft-delete")
 }
+
+// ── helpers ───────────────────────────────────────────────────────────────────
+
+func execAdmin(t *testing.T, sql string, args ...any) {
+	t.Helper()
+	_, err := adminPool.Exec(context.Background(), sql, args...)
+	require.NoError(t, err)
+}
+
+// ── Grant with non-empty Reason (covers the `reason = entry.Reason` branch) ──
+
+func TestRepository_Grant_WithReason(t *testing.T) {
+	cleanupTable(t)
+	ctx := context.Background()
+	tenantID, tenderID, userID, grantedBy, membershipID := uuid.New(), uuid.New(), uuid.New(), uuid.New(), uuid.New()
+	reason := "approved by compliance"
+
+	created, err := repo.Grant(ctx, domain.TenderACLEntry{
+		TenantID: tenantID, TenderID: tenderID, UserID: userID,
+		TenantMembershipID: membershipID, AccessLevel: domain.ACLView,
+		GrantedBy: grantedBy, Reason: reason,
+	})
+	require.NoError(t, err)
+	assert.Equal(t, reason, created.Reason)
+}
+
+// ── Grant INSERT error (covers the non-unique fmt.Errorf branch) ──────────────
+
+func TestRepository_Grant_InsertError(t *testing.T) {
+	cleanupTable(t)
+	execAdmin(t, `
+		CREATE OR REPLACE FUNCTION _test_ins_fail() RETURNS trigger LANGUAGE plpgsql AS $$
+		BEGIN RAISE EXCEPTION 'forced insert failure'; END; $$`)
+	execAdmin(t, `CREATE TRIGGER _test_ins_fail_t BEFORE INSERT ON tender_acl_entries
+				  FOR EACH ROW EXECUTE FUNCTION _test_ins_fail()`)
+	t.Cleanup(func() {
+		_, _ = adminPool.Exec(context.Background(), `DROP TRIGGER IF EXISTS _test_ins_fail_t ON tender_acl_entries`)
+		_, _ = adminPool.Exec(context.Background(), `DROP FUNCTION IF EXISTS _test_ins_fail()`)
+	})
+
+	_, err := repo.Grant(context.Background(), domain.TenderACLEntry{
+		TenantID: uuid.New(), TenderID: uuid.New(), UserID: uuid.New(),
+		TenantMembershipID: uuid.New(), AccessLevel: domain.ACLView, GrantedBy: uuid.New(),
+	})
+	assert.Error(t, err)
+}
+
+// ── List query error (covers `fmt.Errorf("query tender_acl_entries: %w", err)`) ─
+
+func TestRepository_List_QueryError(t *testing.T) {
+	execAdmin(t, `ALTER TABLE tender_acl_entries RENAME TO tender_acl_entries_bak`)
+	t.Cleanup(func() {
+		_, _ = adminPool.Exec(context.Background(), `ALTER TABLE IF EXISTS tender_acl_entries_bak RENAME TO tender_acl_entries`)
+	})
+
+	_, err := repo.List(context.Background(), uuid.New(), uuid.New())
+	assert.Error(t, err)
+}
+
+// ── Revoke exec error (covers `fmt.Errorf("revoke tender_acl_entries: %w", err)`) ─
+
+func TestRepository_Revoke_ExecError(t *testing.T) {
+	cleanupTable(t)
+	ctx := context.Background()
+
+	// Grant a row first (before the trigger is installed).
+	tenantID, tenderID, userID, grantedBy, membershipID := uuid.New(), uuid.New(), uuid.New(), uuid.New(), uuid.New()
+	created, err := repo.Grant(ctx, domain.TenderACLEntry{
+		TenantID: tenantID, TenderID: tenderID, UserID: userID,
+		TenantMembershipID: membershipID, AccessLevel: domain.ACLView, GrantedBy: grantedBy,
+	})
+	require.NoError(t, err)
+
+	// Now install the trigger so the UPDATE in Revoke will fail.
+	execAdmin(t, `
+		CREATE OR REPLACE FUNCTION _test_upd_fail() RETURNS trigger LANGUAGE plpgsql AS $$
+		BEGIN RAISE EXCEPTION 'forced update failure'; END; $$`)
+	execAdmin(t, `CREATE TRIGGER _test_upd_fail_t BEFORE UPDATE ON tender_acl_entries
+				  FOR EACH ROW EXECUTE FUNCTION _test_upd_fail()`)
+	t.Cleanup(func() {
+		_, _ = adminPool.Exec(context.Background(), `DROP TRIGGER IF EXISTS _test_upd_fail_t ON tender_acl_entries`)
+		_, _ = adminPool.Exec(context.Background(), `DROP FUNCTION IF EXISTS _test_upd_fail()`)
+	})
+
+	err = repo.Revoke(ctx, tenantID, tenderID, userID, created.RecordVersion)
+	assert.Error(t, err)
+}
+
+// ── FindActive query error (covers `fmt.Errorf("query active tender_acl_entries: %w", err)`) ─
+
+func TestRepository_FindActive_QueryError(t *testing.T) {
+	execAdmin(t, `ALTER TABLE tender_acl_entries RENAME TO tender_acl_entries_bak`)
+	t.Cleanup(func() {
+		_, _ = adminPool.Exec(context.Background(), `ALTER TABLE IF EXISTS tender_acl_entries_bak RENAME TO tender_acl_entries`)
+	})
+
+	_, err := repo.FindActive(context.Background(), uuid.New(), uuid.New(), uuid.New())
+	assert.Error(t, err)
+}
+
+// ── CascadeDeleteForTenant exec error ─────────────────────────────────────────
+
+func TestRepository_CascadeDeleteForTenant_ExecError(t *testing.T) {
+	cleanupTable(t)
+	ctx := context.Background()
+
+	tenantID, tenderID, userID, grantedBy, membershipID := uuid.New(), uuid.New(), uuid.New(), uuid.New(), uuid.New()
+	_, err := repo.Grant(ctx, domain.TenderACLEntry{
+		TenantID: tenantID, TenderID: tenderID, UserID: userID,
+		TenantMembershipID: membershipID, AccessLevel: domain.ACLView, GrantedBy: grantedBy,
+	})
+	require.NoError(t, err)
+
+	execAdmin(t, `
+		CREATE OR REPLACE FUNCTION _test_del_fail() RETURNS trigger LANGUAGE plpgsql AS $$
+		BEGIN RAISE EXCEPTION 'forced delete failure'; END; $$`)
+	execAdmin(t, `CREATE TRIGGER _test_del_fail_t BEFORE DELETE ON tender_acl_entries
+				  FOR EACH ROW EXECUTE FUNCTION _test_del_fail()`)
+	t.Cleanup(func() {
+		_, _ = adminPool.Exec(context.Background(), `DROP TRIGGER IF EXISTS _test_del_fail_t ON tender_acl_entries`)
+		_, _ = adminPool.Exec(context.Background(), `DROP FUNCTION IF EXISTS _test_del_fail()`)
+	})
+
+	_, err = repo.CascadeDeleteForTenant(ctx, tenantID)
+	assert.Error(t, err)
+}
+
+// ── SoftDeleteForUser exec error ──────────────────────────────────────────────
+
+func TestRepository_SoftDeleteForUser_ExecError(t *testing.T) {
+	cleanupTable(t)
+	ctx := context.Background()
+
+	tenantID, tenderID, userID, grantedBy, membershipID := uuid.New(), uuid.New(), uuid.New(), uuid.New(), uuid.New()
+	_, err := repo.Grant(ctx, domain.TenderACLEntry{
+		TenantID: tenantID, TenderID: tenderID, UserID: userID,
+		TenantMembershipID: membershipID, AccessLevel: domain.ACLView, GrantedBy: grantedBy,
+	})
+	require.NoError(t, err)
+
+	// Reuse the same update trigger function if it exists from a prior test — use CREATE OR REPLACE.
+	execAdmin(t, `
+		CREATE OR REPLACE FUNCTION _test_upd_fail() RETURNS trigger LANGUAGE plpgsql AS $$
+		BEGIN RAISE EXCEPTION 'forced update failure'; END; $$`)
+	execAdmin(t, `CREATE TRIGGER _test_sdu_fail_t BEFORE UPDATE ON tender_acl_entries
+				  FOR EACH ROW EXECUTE FUNCTION _test_upd_fail()`)
+	t.Cleanup(func() {
+		_, _ = adminPool.Exec(context.Background(), `DROP TRIGGER IF EXISTS _test_sdu_fail_t ON tender_acl_entries`)
+		_, _ = adminPool.Exec(context.Background(), `DROP FUNCTION IF EXISTS _test_upd_fail()`)
+	})
+
+	_, err = repo.SoftDeleteForUser(ctx, tenantID, userID)
+	assert.Error(t, err)
+}

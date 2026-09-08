@@ -25,7 +25,8 @@ const docTemplate = `{
         "description": "{{escape .Description}}",
         "title": "{{.Title}}",
         "contact": {
-            "name": "BCBP Solutions"
+            "name": "BCBP Solutions",
+            "email": "sharmila.dayalan@bcbpsolutions.com"
         },
         "license": {
             "name": "Proprietary"
