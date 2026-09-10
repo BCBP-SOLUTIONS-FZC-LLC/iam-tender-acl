@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"strconv"
+	"strings"
 	"time"
 
 	aclpostgres "github.com/BCBP-SOLUTIONS-FZC-LLC/iam-tender-acl/internal/adapter/outbound/postgres"
@@ -40,19 +41,12 @@ type config struct {
 
 	// MemberRemovalQueueURL backs member-removal-tenderacl-q (ADR-0007 Wave
 	// 3 Phase 3) — the per-user-removal ACL cascade, separate from the
-	// tenant-offboarding cascade's queue. No
-	// field for that one here: SQS_QUEUE_URL and every other SQS_* tunable
-	// for it are loaded directly from platform-events/pkg/config.LoadSQS()
-	// in main.go instead of being duplicated into this struct — that
-	// package has no concept of a second queue, so MemberRemovalQueueURL
-	// stays hand-rolled here.
+	// tenant-offboarding cascade's queue. SQS_QUEUE_URL and every other
+	// SQS_* tunable for queue #1 are loaded from platform-events/pkg/config
+	// LoadSQS(); main.go clones that env and overrides QueueURL +
+	// concurrency so queue #2 still goes through SQSConfigFromEnv /
+	// SQSConsumerOptions. Only the second queue's URL lives here.
 	MemberRemovalQueueURL string
-	// AWSRegion is shared by both SQS queues; also duplicated into
-	// LoadSQS()'s own SQSConfigEnv.Region for the first (same env var,
-	// same default, read twice — not a source of drift).
-	AWSRegion string
-
-	OTELExporterOTLPEndpoint string
 
 	Environment string
 
@@ -66,6 +60,11 @@ type config struct {
 }
 
 func loadConfig() (config, error) {
+	membershipCheckTimeoutMS, err := getEnvInt("MEMBERSHIP_CHECK_TIMEOUT_MS", 300)
+	if err != nil {
+		return config{}, err
+	}
+
 	cfg := config{
 		HTTPPort:               getEnv("HTTP_PORT", "8080"),
 		MetricsPort:            getEnv("METRICS_PORT", "9090"),
@@ -74,17 +73,16 @@ func loadConfig() (config, error) {
 		ValkeyAddr:             getEnv("VALKEY_ADDR", "localhost:6379"),
 		ValkeyPassword:         os.Getenv("VALKEY_PASSWORD"),
 		CoreInternalBaseURL:    getEnv("CORE_INTERNAL_BASE_URL", "http://org-membership.iam.svc.cluster.local"),
-		MembershipCheckTimeout: time.Duration(getEnvInt("MEMBERSHIP_CHECK_TIMEOUT_MS", 300)) * time.Millisecond,
+		MembershipCheckTimeout: time.Duration(membershipCheckTimeoutMS) * time.Millisecond,
 		MemberRemovalQueueURL:  os.Getenv("MEMBER_REMOVAL_SQS_QUEUE_URL"),
-		AWSRegion:              getEnv("AWS_REGION", "us-east-1"),
-
-		OTELExporterOTLPEndpoint: os.Getenv("OTEL_EXPORTER_OTLP_ENDPOINT"),
 
 		Environment: getEnv("ENVIRONMENT", "production"),
 
 		ProcessedEventsCleanupInterval: time.Hour,
 
-		DocsEnabled:   getEnv("DOCS_ENABLED", "false") == "true",
+		// strings.EqualFold rather than =="true": DOCS_ENABLED=TRUE/True
+		// must not silently resolve to disabled.
+		DocsEnabled:   strings.EqualFold(getEnv("DOCS_ENABLED", "false"), "true"),
 		DocsAuthToken: os.Getenv("DOCS_AUTH_TOKEN"),
 	}
 
@@ -107,14 +105,18 @@ func getEnv(key, fallback string) string {
 	return fallback
 }
 
-func getEnvInt(key string, fallback int) int {
+// getEnvInt returns fallback when key is unset, but fails loudly (rather
+// than silently falling back) when key IS set to something that doesn't
+// parse as an integer — a typo'd operator-set env var should abort startup,
+// not silently resolve to a default the operator never sees.
+func getEnvInt(key string, fallback int) (int, error) {
 	raw := os.Getenv(key)
 	if raw == "" {
-		return fallback
+		return fallback, nil
 	}
 	v, err := strconv.Atoi(raw)
 	if err != nil {
-		return fallback
+		return 0, fmt.Errorf("%s: invalid integer %q: %w", key, raw, err)
 	}
-	return v
+	return v, nil
 }

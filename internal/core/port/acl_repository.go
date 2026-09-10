@@ -17,9 +17,10 @@ import (
 // TenderACLRepository is the persistence port for tender_acl_entries,
 // implemented by internal/adapter/outbound/postgres.TenderACLRepository.
 type TenderACLRepository interface {
-	// List implements TAC-1: every active-or-not row for a tenant/tender,
-	// ordered by created_at.
-	List(ctx context.Context, tenantID, tenderID uuid.UUID) ([]domain.TenderACLEntry, error)
+	// List implements TAC-1: active-or-not rows for a tenant/tender, ordered
+	// by created_at, windowed by limit/offset (already validated/clamped by
+	// the caller — see handler.go's parseListPagination).
+	List(ctx context.Context, tenantID, tenderID uuid.UUID, limit, offset int) ([]domain.TenderACLEntry, error)
 
 	// Grant implements TAC-2's write: entry.ID/RecordVersion/CreatedAt/
 	// UpdatedAt are ignored on input and populated from the inserted row.

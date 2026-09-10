@@ -1,13 +1,16 @@
 #!/usr/bin/env bash
 # Enforces minimum total test coverage.
 #
-# 70% is a starting baseline, not an aspiration — the real merged (unit +
-# integration + rls) coverage at the time this gate was introduced was
-# 72.5%. Ratchet this threshold up over time as more tests are added; never
-# lower it to make a failing PR pass.
+# Raised from 70% to 85% after a production-readiness audit: the real merged
+# (unit + integration + rls) coverage was already 91.6% at the time of the
+# raise, and this service sits on a live authorization-decision path (TAC-4)
+# — the 70% floor (a starting baseline set when merged coverage was 72.5%)
+# no longer reflected either the actual test suite or the stakes of this
+# service's own hot path. Ratchet this threshold up over time as more tests
+# are added; never lower it to make a failing PR pass.
 set -euo pipefail
 
-THRESHOLD="${COVERAGE_THRESHOLD:-70}"
+THRESHOLD="${COVERAGE_THRESHOLD:-85}"
 
 test -f coverage.out || {
   echo "::error file=coverage.out,title=Coverage gate::coverage.out missing — run 'make test-ci' before the coverage gate"

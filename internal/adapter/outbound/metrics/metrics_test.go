@@ -7,6 +7,8 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	gincommon "github.com/BCBP-SOLUTIONS-FZC-LLC/platform-gincommon/pkg/gincommon"
 )
 
 // newTestMetrics returns a Metrics backed by a fresh isolated registry so
@@ -19,6 +21,24 @@ func newTestMetrics(t *testing.T) *Metrics {
 	return m
 }
 
+func TestNewMetrics_PicksUpGincommonConstLabels(t *testing.T) {
+	// ObservabilityMiddlewares is gincommon's public metrics-init API —
+	// production calls it before NewMetrics so business collectors inherit
+	// {service, version}. Isolated registry so this doesn't collide with
+	// other tests' DefaultRegisterer collectors.
+	_ = gincommon.ObservabilityMiddlewares(gincommon.Config{
+		ServiceName:  "tender-acl-test",
+		BuildVersion: "test",
+	})
+	reg := prometheus.NewRegistry()
+	m, err := NewMetrics(reg)
+	require.NoError(t, err)
+	require.NotNil(t, m)
+	got := gincommon.MetricsConstLabels()
+	assert.Equal(t, "tender-acl-test", got["service"])
+	assert.Equal(t, "test", got["version"])
+}
+
 func TestNewMetrics_CustomRegisterer_Succeeds(t *testing.T) {
 	reg := prometheus.NewRegistry()
 	m, err := NewMetrics(reg)
@@ -27,11 +47,8 @@ func TestNewMetrics_CustomRegisterer_Succeeds(t *testing.T) {
 }
 
 func TestNewMetrics_NilRegisterer_UsesDefault(t *testing.T) {
-	// Passing an explicit nil falls back to DefaultRegisterer.
+	// Passing an explicit nil falls back to gincommon.MetricsRegisterer().
 	// Use a fresh registry to avoid polluting the default in the test process.
-	// We test the branch logic only — the nil path re-uses DefaultRegisterer
-	// so we can't safely register twice; just verify the nil branch compiles
-	// and is exercised via a separate registry path above.
 	reg := prometheus.NewRegistry()
 	m, err := NewMetrics(reg) // non-nil branch
 	require.NoError(t, err)
@@ -103,5 +120,13 @@ func TestMetrics_RecordUnexpectedEventType_DoesNotPanic(t *testing.T) {
 	assert.NotPanics(t, func() {
 		m.RecordUnexpectedEventType(context.Background(), "tenant-lifecycle-tenderacl-q", "SomeOtherEvent")
 		m.RecordUnexpectedEventType(context.Background(), "member-removal-tenderacl-q", "TenantOffboarded")
+	})
+}
+
+func TestMetrics_RecordProcessedEventsDuplicate_DoesNotPanic(t *testing.T) {
+	m := newTestMetrics(t)
+	assert.NotPanics(t, func() {
+		m.RecordProcessedEventsDuplicate(context.Background(), "tenant_lifecycle_cleanup")
+		m.RecordProcessedEventsDuplicate(context.Background(), "member_removal")
 	})
 }

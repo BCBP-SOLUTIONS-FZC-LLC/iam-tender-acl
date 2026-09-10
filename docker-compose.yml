@@ -89,6 +89,10 @@ services:
       # Falls back to DATABASE_URL if unset — must be set explicitly here,
       # since tender_acl_app cannot apply schema migrations.
       MIGRATION_DATABASE_URL: postgres://tender_acl:tender_acl@postgres:5432/tender_acl?sslmode=disable
+      PG_MAX_CONNS: "10"
+      PG_MIN_CONNS: "0"
+      PG_SLOW_QUERY_THRESHOLD: "200ms"
+      PG_STATEMENT_TIMEOUT: "5s"
       VALKEY_ADDR: valkey:6379
       VALKEY_PASSWORD: ""
       # The one synchronous outbound dependency (LLD §6.3, §7.6.2) — points
@@ -111,10 +115,9 @@ services:
       SQS_CONCURRENCY: "4"
       # ADR-0007 Wave 3 Phase 3 — the
       # per-user-removal ACL cascade, a second/independent subscription
-      # from the tenant-offboarding one above. No platform-events/pkg/config
-      # equivalent for this second queue, so its concurrency stays
-      # hand-rolled via CONSUMER_CONCURRENCY (unset here — defaults to 4
-      # in code, same effective value as SQS_CONCURRENCY above).
+      # from the tenant-offboarding one above. LoadSQS covers one queue;
+      # main.go clones that env and overrides URL + concurrency
+      # (MEMBER_REMOVAL_SQS_CONCURRENCY, falling back to CONSUMER_CONCURRENCY).
       MEMBER_REMOVAL_SQS_QUEUE_URL: http://localstack:4566/000000000000/member-removal-tenderacl-q
       MEMBER_REMOVAL_SQS_DLQ_URL: http://localstack:4566/000000000000/member-removal-tenderacl-q-dlq
       AWS_REGION: us-east-1
@@ -126,10 +129,14 @@ services:
       # "no EC2 IMDS role found ... host is down".
       AWS_ACCESS_KEY_ID: localstack
       AWS_SECRET_ACCESS_KEY: localstack
-      # otlptracehttp (HTTP, not gRPC) — the collector's default port is
-      # 4318, not the gRPC default of 4317.
-      OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4318
+      # gRPC OTLP — tracing goes through platform-gincommon's
+      # InitTracing / ObservabilityMiddlewares (port 4317, bare host:port,
+      # no scheme). There is no collector in this compose stack; gincommon
+      # still installs an in-process TracerProvider so spans get valid
+      # trace IDs (export is a no-op until a collector is reachable).
+      OTEL_EXPORTER_OTLP_ENDPOINT: otel-collector:4317
       ENVIRONMENT: development
+      APP_ENV: development
     restart: unless-stopped
 
 volumes:

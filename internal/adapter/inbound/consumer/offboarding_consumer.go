@@ -1,3 +1,20 @@
+// Package consumer implements this service's event-driven behavior:
+// consuming TenantMembershipsPurged (formerly TenantOffboarded — renamed by
+// iam-org-membership under ADR-0008 to stop colliding with Realm
+// Provisioner's own, differently-scoped TenantOffboarded event) from
+// tenant-lifecycle-tenderacl-q (cascading the deletion of that tenant's
+// tender_acl_entries rows) and MembershipRevoked (formerly
+// TenantMembershipRemoved, consolidated by the same ADR-0008 pass) from
+// member-removal-tenderacl-q (ADR-0007 Wave 3 Phase 3 — soft-deleting one
+// removed user's rows, replacing the
+// same-transaction SoftDeleteForUser call iam-org-membership's RemoveUser
+// used to make before this table moved to its own database). This service
+// publishes zero events (LLD §10.2/TAC-EVT-1) — there is no outbox, no SNS
+// producer, and no glue registration anywhere in this codebase; these are
+// inbound-only subscriptions. Idempotency uses Envelope.ID + INSERT ON
+// CONFLICT DO NOTHING against processed_events (platform-events has no
+// processed-events API); cascade and MarkProcessed share one TxRunner
+// transaction (IDEMP-2).
 package consumer
 
 import (
@@ -20,8 +37,9 @@ type CascadeDeleter interface {
 	CascadeDeleteForTenant(ctx context.Context, tenantID uuid.UUID) (int64, error)
 }
 
-// IdempotencyStore is the minimal slice of ProcessedEvents this consumer
-// needs.
+// IdempotencyStore is the minimal slice of postgres.ProcessedEvents this
+// consumer needs. Kept local so this package does not import the outbound
+// postgres adapter (arch-lint: inbound ↛ outbound).
 type IdempotencyStore interface {
 	IsProcessed(ctx context.Context, eventID uuid.UUID) (bool, error)
 	MarkProcessed(ctx context.Context, eventID uuid.UUID) error
@@ -39,6 +57,7 @@ type CascadeMetrics interface {
 	// rename was caught (see CHANGELOG.md). Mirrors iam-org-membership's
 	// iam_unknown_event_acknowledged_total.
 	RecordUnexpectedEventType(ctx context.Context, queue, eventType string)
+	RecordProcessedEventsDuplicate(ctx context.Context, consumer string)
 }
 
 // tenantMembershipsPurgedEventType was "TenantOffboarded" until
@@ -65,32 +84,31 @@ const tenantLifecycleQueueName = "tenant-lifecycle-tenderacl-q"
 type OffboardingConsumer struct {
 	repo        CascadeDeleter
 	idempotency IdempotencyStore
+	tx          port.TxRunner
 	metrics     CascadeMetrics
 	logger      port.SlogStyleLogger
 	tracer      trace.Tracer
 }
 
 // NewOffboardingConsumer builds an OffboardingConsumer.
-func NewOffboardingConsumer(repo CascadeDeleter, idempotency IdempotencyStore, metrics CascadeMetrics, logger port.SlogStyleLogger, tracer trace.Tracer) *OffboardingConsumer {
-	return &OffboardingConsumer{repo: repo, idempotency: idempotency, metrics: metrics, logger: logger, tracer: tracer}
+func NewOffboardingConsumer(repo CascadeDeleter, idempotency IdempotencyStore, tx port.TxRunner, metrics CascadeMetrics, logger port.SlogStyleLogger, tracer trace.Tracer) *OffboardingConsumer {
+	return &OffboardingConsumer{repo: repo, idempotency: idempotency, tx: tx, metrics: metrics, logger: logger, tracer: tracer}
 }
 
 // Handle implements the events.Handler function signature.
 //
-// Idempotency is checked before doing any work and recorded only after the
-// cascade fully succeeds, so a crash mid-cascade simply leaves the event
-// unmarked and redelivery reruns the (idempotent) cascade to completion.
-// Returning a non-nil error leaves the message on the queue for redelivery.
+// Known types: skipDuplicate, then one TxRunner transaction for the
+// cascade and MarkProcessed so a crash between them cannot leave the
+// event unmarked after a committed delete (IDEMP-2). Unknown types:
+// ackUnknown marks processed_events so redelivery does not storm.
 func (c *OffboardingConsumer) Handle(ctx context.Context, env events.Envelope[json.RawMessage]) error {
 	ctx, span := c.tracer.Start(ctx, "OffboardingConsumer.Handle")
 	defer span.End()
 
 	if env.Type != "" && env.Type != tenantMembershipsPurgedEventType {
-		c.metrics.RecordUnexpectedEventType(ctx, tenantLifecycleQueueName, env.Type)
-		c.logger.WarnContext(ctx, "ignoring unexpected event type on tenant-lifecycle-tenderacl-q",
-			"event_type", env.Type,
-			"event_id", env.ID,
-		)
+		if err := ackUnknown(ctx, c.tx, c.idempotency, c.metrics, c.logger, tenantLifecycleQueueName, env); err != nil {
+			return fmt.Errorf("offboardingconsumer: %w", err)
+		}
 		return nil
 	}
 
@@ -108,7 +126,7 @@ func (c *OffboardingConsumer) Handle(ctx context.Context, env events.Envelope[js
 		"event_id", eventID.String(),
 	)
 
-	processed, err := c.idempotency.IsProcessed(ctx, eventID)
+	processed, err := skipDuplicate(ctx, c.idempotency, c.metrics, offboardingConsumerName, eventID)
 	if err != nil {
 		return fmt.Errorf("offboardingconsumer: check idempotency for event %s: %w", eventID, err)
 	}
@@ -117,17 +135,21 @@ func (c *OffboardingConsumer) Handle(ctx context.Context, env events.Envelope[js
 		return nil
 	}
 
-	deleted, err := c.repo.CascadeDeleteForTenant(ctx, tenantID)
+	gucCtx, err := withTenantGUC(ctx, tenantID)
 	if err != nil {
-		c.metrics.RecordCascade(ctx, "error")
-		return fmt.Errorf("offboardingconsumer: cascade delete for tenant %s: %w", tenantID, err)
+		return fmt.Errorf("offboardingconsumer: bind tenant GUC for %s: %w", tenantID, err)
 	}
-
-	if err := c.idempotency.MarkProcessed(ctx, eventID); err != nil {
-		return fmt.Errorf("offboardingconsumer: mark event %s processed: %w", eventID, err)
-	}
-
-	c.metrics.RecordCascade(ctx, "success")
-	logger.InfoContext(ctx, "tenant offboarding cascade complete", "deleted", deleted)
-	return nil
+	return c.tx.RunInTx(gucCtx, func(txCtx context.Context) error {
+		deleted, err := c.repo.CascadeDeleteForTenant(txCtx, tenantID)
+		if err != nil {
+			c.metrics.RecordCascade(txCtx, "error")
+			return fmt.Errorf("offboardingconsumer: cascade delete for tenant %s: %w", tenantID, err)
+		}
+		if err := c.idempotency.MarkProcessed(txCtx, eventID); err != nil {
+			return fmt.Errorf("offboardingconsumer: mark event %s processed: %w", eventID, err)
+		}
+		c.metrics.RecordCascade(txCtx, "success")
+		logger.InfoContext(txCtx, "tenant offboarding cascade complete", "deleted", deleted)
+		return nil
+	})
 }

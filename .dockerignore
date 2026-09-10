@@ -16,6 +16,13 @@ profile.cov
 deploy/
 test/
 scripts/
-docs/
+# NOT docs/ wholesale: cmd/tender-acl/main.go blank-imports
+# docs/swagger (the make-swag-generated package, registered via its own
+# init()) — excluding it here broke every Docker build (confirmed: `docker
+# build` fails at the `go build` step with "no required module provides
+# package .../docs/swagger"). Only the two doc-only subdirectories are
+# actually safe to exclude from the build context.
+docs/lld/
+docs/architecture/
 
 *.md

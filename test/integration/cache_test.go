@@ -74,3 +74,22 @@ func TestValkeyCache_Set_ExpiresAfterTTL(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, int64(0), exists, "key must have expired")
 }
+
+// TestValkeyCache_Get_MalformedStoredValue_ReturnsUnmarshalError covers
+// Cache.Get's json.Unmarshal error branch: a value that isn't valid
+// CachedAccess JSON (e.g. written by a future incompatible version, or
+// corrupted) must surface as an error, not a false cache hit or a panic.
+// Written directly via the raw client since Cache.Set can never itself
+// produce malformed JSON.
+func TestValkeyCache_Get_MalformedStoredValue_ReturnsUnmarshalError(t *testing.T) {
+	ctx := context.Background()
+	tenantID, tenderID, userID := uuid.New(), uuid.New(), uuid.New()
+	rawKey := "tac:acl:" + tenantID.String() + ":" + tenderID.String() + ":" + userID.String()
+	require.NoError(t, valkeyClient.Set(ctx, rawKey, `not-valid-json`, time.Minute).Err())
+
+	got, hit, err := valkeyCache.Get(ctx, tenantID, tenderID, userID)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "cache: unmarshal:")
+	assert.False(t, hit)
+	assert.Nil(t, got)
+}

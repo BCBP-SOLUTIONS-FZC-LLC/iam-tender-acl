@@ -21,8 +21,6 @@ import (
 	"github.com/google/uuid"
 	"github.com/redis/go-redis/v9"
 
-	pgcommon "github.com/BCBP-SOLUTIONS-FZC-LLC/platform-pgcommon/pkg/pgcommon"
-
 	httpadapter "github.com/BCBP-SOLUTIONS-FZC-LLC/iam-tender-acl/internal/adapter/inbound/http"
 	"github.com/BCBP-SOLUTIONS-FZC-LLC/iam-tender-acl/internal/adapter/outbound/metrics"
 	aclpostgres "github.com/BCBP-SOLUTIONS-FZC-LLC/iam-tender-acl/internal/adapter/outbound/postgres"
@@ -30,6 +28,9 @@ import (
 	"github.com/BCBP-SOLUTIONS-FZC-LLC/iam-tender-acl/internal/core/port"
 	"github.com/BCBP-SOLUTIONS-FZC-LLC/iam-tender-acl/internal/core/service"
 	"github.com/BCBP-SOLUTIONS-FZC-LLC/iam-tender-acl/test/testutil"
+
+	gincommon "github.com/BCBP-SOLUTIONS-FZC-LLC/platform-gincommon/pkg/gincommon"
+	pgcommon "github.com/BCBP-SOLUTIONS-FZC-LLC/platform-pgcommon/pkg/pgcommon"
 
 	nooptrace "go.opentelemetry.io/otel/trace/noop"
 )
@@ -109,7 +110,7 @@ func runTestMain(m *testing.M) int {
 	// nil Logger — gincommon.Config.Logger's own doc comment documents nil
 	// as valid (disables logging, no-op); no test here asserts on log
 	// output.
-	router := httpadapter.NewRouter(h, pgPool, aclCache, nil, nil, httpadapter.DocsConfig{Environment: "development"})
+	router := httpadapter.NewRouter(h, pgPool, aclCache, gincommon.Config{ServiceName: "tender-acl"}, httpadapter.DocsConfig{Environment: "development"})
 	handler = router.Handler()
 
 	return m.Run()

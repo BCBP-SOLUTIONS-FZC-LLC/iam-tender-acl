@@ -19,7 +19,7 @@
 FROM golang:1.26.6-bookworm@sha256:116d58cbd88c1297624acc6e967a060012422bacf9930927e23fb719189c6f36 AS builder
 
 ARG BUILD_VERSION=dev
-ARG SOURCE_DATE_EPOCH
+ARG SOURCE_DATE_EPOCH=0
 ENV SOURCE_DATE_EPOCH=${SOURCE_DATE_EPOCH}
 
 WORKDIR /src
@@ -32,6 +32,10 @@ COPY go.mod go.sum ./
 # github.com/BCBP-SOLUTIONS-FZC-LLC modules (not vendored locally), fetched
 # via git using a short-lived token — same secret-handling pattern as
 # iam-org-membership/iam-catalog-admin's Dockerfiles.
+# Base image is digest-pinned (golang:1.26.6-bookworm@sha256:...) so apt
+# package versions intentionally track Bookworm security updates rather
+# than being pegged to a point release.
+# hadolint ignore=DL3008
 RUN apt-get update && apt-get install -y --no-install-recommends git ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
@@ -45,8 +49,10 @@ RUN --mount=type=secret,id=go_private_token \
     go mod download && \
     git config --global --unset url."https://x-access-token:${TOKEN}@github.com/".insteadOf
 
-# Now copy the remainder of the source tree.
-COPY . .
+# Now copy the remainder of the source tree. --link decouples this copy
+# from prior layers for better layer-cache reuse (matches
+# iam-org-membership's identical builder-stage COPY).
+COPY --link . .
 
 RUN CGO_ENABLED=0 GOOS=linux \
     GOPRIVATE="github.com/BCBP-SOLUTIONS-FZC-LLC/*" \
@@ -71,12 +77,20 @@ RUN CGO_ENABLED=0 GOOS=linux \
 #   COPY --from=builder /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/ca-certificates.crt
 FROM gcr.io/distroless/static-debian12:nonroot@sha256:1b7b9f0f0e0a1d2155f531db587cc48ec26aaf97ab64364225f5bf18a054e66a AS runtime
 
+# Re-declared: ARGs from the builder stage don't cross a FROM boundary.
+# ENV (not just the label) matches iam-org-membership's identical pattern —
+# main.go's getEnv("BUILD_VERSION", buildVersion) reads this as a fallback,
+# though the -ldflags -X main.buildVersion=... embed already covers it.
+ARG BUILD_VERSION=dev
+ENV BUILD_VERSION=${BUILD_VERSION}
+
 LABEL org.opencontainers.image.title="iam-tender-acl" \
       org.opencontainers.image.description="Tender ACL overlay service (tender_acl_entries) for the IAM stack — extracted from iam-org-membership per ADR-0007 Wave 3, interim pending Wave 4 merge into the Tender Service" \
       org.opencontainers.image.source="https://github.com/BCBP-SOLUTIONS-FZC-LLC/iam-tender-acl" \
       org.opencontainers.image.vendor="BCBP Solutions" \
       org.opencontainers.image.licenses="Proprietary" \
-      org.opencontainers.image.base.name="gcr.io/distroless/static-debian12:nonroot"
+      org.opencontainers.image.base.name="gcr.io/distroless/static-debian12:nonroot" \
+      org.opencontainers.image.revision="${BUILD_VERSION}"
 
 WORKDIR /
 

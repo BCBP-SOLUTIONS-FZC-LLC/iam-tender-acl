@@ -303,21 +303,48 @@ jobs:
             --namespace="${{ vars.K8S_NAMESPACE || 'default' }}" \
             --timeout=5m
 
+      # Two silent-pass holes closed here (both would otherwise let a
+      # crash-looping or unscraped deploy report "healthy"):
+      #   1. A missing PROMETHEUS_URL used to `exit 0` — no verification at
+      #      all, reported as success. It now fails the gate unless the
+      #      bypass is explicit (vars.ALLOW_DEPLOY_WITHOUT_HEALTH_GATE).
+      #   2. An error-rate query with no Prometheus result (no traffic yet,
+      #      OR a broken/mismatched job label — the two are indistinguishable
+      #      from that query alone) used to fall back to "0" via `// "0"`,
+      #      reading as a healthy 0% error rate either way. This now checks
+      #      up{job=~".*tender-acl.*"} first — confirming Prometheus is
+      #      actually scraping this deployment — before trusting any
+      #      "no data" result from the error-rate query as "no traffic yet"
+      #      rather than "monitoring is broken."
       - name: Health gate — error rate < 1% for 2 minutes
         run: |
           PROM_URL="${{ vars.PROMETHEUS_URL }}"
           if [ -z "$PROM_URL" ]; then
-            echo "PROMETHEUS_URL not set — skipping error-rate check"
-            exit 0
+            if [ "${{ vars.ALLOW_DEPLOY_WITHOUT_HEALTH_GATE }}" = "true" ]; then
+              echo "::warning::PROMETHEUS_URL not set — health gate explicitly bypassed via ALLOW_DEPLOY_WITHOUT_HEALTH_GATE. This release shipped with NO automated verification."
+              exit 0
+            fi
+            echo "::error::PROMETHEUS_URL is not set — cannot verify deployment health. Configure vars.PROMETHEUS_URL, or set vars.ALLOW_DEPLOY_WITHOUT_HEALTH_GATE=true to explicitly ship without this check."
+            exit 1
           fi
+
+          UP_QUERY='sum(up{job=~".*tender-acl.*"})'
+          SCRAPE_COUNT=$(curl -sf "${PROM_URL}/api/v1/query" \
+            --data-urlencode "query=${UP_QUERY}" | jq -r '.data.result[0].value[1] // "0"')
+          if ! awk "BEGIN{exit !($SCRAPE_COUNT >= 1)}"; then
+            echo "::error::Prometheus reports zero scraped targets for job=~\".*tender-acl.*\" (up query returned ${SCRAPE_COUNT}). Cannot distinguish \"no traffic yet\" from \"monitoring is broken\" — treating as unverified and failing the gate rather than silently passing. Check the ServiceMonitor/scrape config, then re-run."
+            exit 1
+          fi
+          echo "Confirmed Prometheus is scraping ${SCRAPE_COUNT} tender-acl target(s)."
+
           # http_requests_total, not a tender_acl_-prefixed name: this
           # service passes generic per-request HTTP metrics through from
           # platform-gincommon's own ObservabilityMiddlewares rather than
           # duplicating them (see internal/adapter/outbound/metrics).
           # error_class="server_error" is gincommon's 5xx bucket.
           QUERY='sum(rate(http_requests_total{job=~".*tender-acl.*",error_class="server_error"}[2m]))/sum(rate(http_requests_total{job=~".*tender-acl.*"}[2m]))'
-          # Sleep AFTER confirming Prometheus is configured so the 2-minute window
-          # only runs when there is actually something to measure.
+          # Sleep AFTER confirming Prometheus is configured/scraping so the
+          # 2-minute window only runs when there is actually something to measure.
           sleep 120
           RATE=$(curl -sf "${PROM_URL}/api/v1/query" \
             --data-urlencode "query=${QUERY}" | jq -r '.data.result[0].value[1] // "0"')

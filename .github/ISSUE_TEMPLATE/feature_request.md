@@ -7,9 +7,9 @@ assignees: ''
 ---
 
 ## Problem / motivation
-What problem does this solve? Which callers or use cases are affected (tender-admin UI, Tender Service, AuthZ Enrichment, the tenant-offboarding consumer)?
+What problem does this solve? Which callers or use cases are affected (tender-admin UI, Tender Service, AuthZ Enrichment, the tenant-offboarding or per-user-removal consumers)?
 
-Note: this service is explicitly interim (ADR-0007 Option D — scheduled to merge into the Tender Service, see `tender-acl-service-lld.md` §22). Prefer minimal, near-literal changes over new abstractions that would need unwinding at the Wave 4 merge (TAC-D1).
+Note: this service is explicitly interim (ADR-0007 Option D — scheduled to merge into the Tender Service, see `docs/lld/iam-lld-tender-acl-service.md` §25). Prefer minimal, near-literal changes over new abstractions that would need unwinding at the Wave 4 merge (TAC-D1).
 
 ## Proposed solution
 Describe the API or behaviour change you'd like.
@@ -23,7 +23,7 @@ Describe the API or behaviour change you'd like.
 - [ ] Internal HTTP API (TAC-4 authorization check)
 - [ ] Domain model (new field or entity in `internal/core/domain`)
 - [ ] Database schema (new migration required)
-- [ ] Event contract (this service only ever *consumes* `TenantOffboarded` — it publishes zero events per TAC-EVT-1/TAC-D5; a change here should not introduce a producer)
+- [ ] Event contract (this service only ever *consumes* `TenantMembershipsPurged`/`MembershipRevoked` — it publishes zero events per TAC-EVT-1/TAC-D5; a change here should not introduce a producer)
 - [ ] Cache strategy (`tac:acl` TTL or invalidation)
 - [ ] Membership-check client (`internal/adapter/outbound/membershipcheck`)
 - [ ] Helm / deployment config
@@ -37,4 +37,4 @@ Other approaches you evaluated and why you ruled them out.
 - [ ]
 
 ## Additional context
-Links to related issues, the LLD (`tender-acl-service-lld.md`), or prior art.
+Links to related issues, the LLD (`docs/lld/iam-lld-tender-acl-service.md`), or prior art.

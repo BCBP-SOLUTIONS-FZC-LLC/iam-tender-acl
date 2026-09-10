@@ -1,8 +1,8 @@
 # Default values for iam-tender-acl.
-# Deployment topology: stateless HTTP API (TAC-1..4) + an in-process SQS
-# consumer for TenantOffboarded, both running in the same pod/binary
-# (cmd/tender-acl). No CronJobs, no reconciler binary, no events published
-# (TAC-EVT-1, TAC-D5).
+# Deployment topology: stateless HTTP API (TAC-1..4) + two in-process SQS
+# consumers (TenantMembershipsPurged, MembershipRevoked), both running in
+# the same pod/binary (cmd/tender-acl). No CronJobs, no reconciler binary,
+# no events published (TAC-EVT-1, TAC-D5).
 
 replicaCount: 2
 
@@ -55,6 +55,8 @@ resources:
 # credential (DATABASE_URL, VALKEY_PASSWORD) lives in envFromSecret below.
 env:
   ENVIRONMENT: "production"
+  APP_ENV: "production"
+  APP_NAME: "tender-acl"
   HTTP_PORT: "8080"
   METRICS_PORT: "9090"
 
@@ -73,7 +75,7 @@ env:
   CORE_INTERNAL_BASE_URL: "http://org-membership.iam.svc.cluster.local"
   MEMBERSHIP_CHECK_TIMEOUT_MS: "300"
 
-  # AWS SQS — TenantOffboarded consumer (receive-only; this service
+  # AWS SQS — TenantMembershipsPurged consumer (receive-only; this service
   # publishes zero events, so there is no SNS topic to configure).
   # SQS_QUEUE_URL and SQS_CONCURRENCY are loaded by
   # platform-events/pkg/config's LoadSQS, not this service's own config.go —
@@ -86,30 +88,33 @@ env:
   # removal ACL cascade, a second/independent SQS subscription from the
   # tenant-offboarding one above (separate queue/DLQ, not a discriminated
   # payload on the same queue — see MemberRemovalConsumer's doc comment).
-  # No platform-events/pkg/config equivalent for this second queue (LoadSQS
-  # only covers one queue per service), so its concurrency stays hand-rolled
-  # via CONSUMER_CONCURRENCY below.
+  # LoadSQS covers one queue; main.go clones that env and overrides URL +
+  # concurrency so this queue still goes through SQSConfigFromEnv /
+  # SQSConsumerOptions. MEMBER_REMOVAL_SQS_CONCURRENCY falls back to
+  # CONSUMER_CONCURRENCY.
   MEMBER_REMOVAL_SQS_QUEUE_URL: ""
   MEMBER_REMOVAL_SQS_DLQ_URL: ""
   AWS_REGION: "us-east-1"
-  # member-removal-tenderacl-q's concurrency only — see SQS_CONCURRENCY
-  # above for tenant-lifecycle-tenderacl-q's.
+  MEMBER_REMOVAL_SQS_CONCURRENCY: "4"
   CONSUMER_CONCURRENCY: "4"
 
-  # OpenTelemetry. Tracing goes through platform-gincommon's
-  # ObservabilityMiddlewares now (OTLP/gRPC), not a hand-rolled
-  # otlptracehttp exporter — so the collector endpoint is gRPC's default
-  # port 4317, not 4318, and is a bare host:port with no scheme.
+  # OpenTelemetry. Tracing is bootstrapped at process start via
+  # gincommon.InitTracing (OTLP/gRPC), not a hand-rolled otlptracehttp
+  # exporter — so the collector endpoint is gRPC's default port 4317,
+  # a bare host:port with no scheme. Sample ratio / insecure defaults
+  # come from gincommon's APP_ENV (production → 0.1 / TLS).
   OTEL_EXPORTER_OTLP_ENDPOINT: "otel-collector.observability.svc.cluster.local:4317"
 
   # Postgres pool sizing (pgcommon.ConfigFromEnv() — LLD-consistent with
-  # every sibling IAM service). PG_BOUNCER_MODE is deliberately absent here:
-  # cmd/tender-acl/main.go forces PGBouncerMode=true unconditionally
-  # (transaction-scoped RLS GUCs are required regardless of topology, not a
-  # tunable), so setting it via env would be misleading.
+  # every sibling IAM service) plus PG_STATEMENT_TIMEOUT (appended to the
+  # DSN via postgres.ApplyStatementTimeout). PG_BOUNCER_MODE is deliberately
+  # absent here: cmd/tender-acl/main.go forces PGBouncerMode=true
+  # unconditionally (transaction-scoped RLS GUCs are required regardless of
+  # topology, not a tunable), so setting it via env would be misleading.
   PG_MAX_CONNS: "10"
-  PG_MIN_CONNS: "2"
+  PG_MIN_CONNS: "0"
   PG_SLOW_QUERY_THRESHOLD: "200ms"
+  PG_STATEMENT_TIMEOUT: "5s"
 
   # Docs surface (optional). Swagger UI is always mounted outside
   # production; DOCS_ENABLED opts it into production too, and

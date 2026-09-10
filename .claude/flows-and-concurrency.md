@@ -1,14 +1,32 @@
 # Flows, concurrency, and shutdown
 
+## List flow (TAC-1)
+
+`ACLService.List` — validated/clamped pagination is entirely the handler's job
+(`parseListPagination` in `internal/adapter/inbound/http/handler.go`): `?limit=` defaults to 100,
+clamps silently to a hard ceiling of 500, and rejects a non-positive/non-integer value as
+`400 invalid_request`; `?offset=` defaults to 0 and rejects negative/non-integer as the same code.
+The service/repository layers trust the already-validated `limit`/`offset` ints as-is — no
+re-validation — and pass them straight through to `SELECT ... LIMIT $3 OFFSET $4`. No concurrency
+concerns: a plain read, not cached (TAC-1 never touches Valkey).
+
 ## Grant flow (TAC-2)
 
-`ACLService.Grant` (span `service.ACLService.Grant`):
+`ACLService.Grant` (span `service.ACLService.Grant`). Both this and Revoke go through
+`limitRequestBody` first (`http.MaxBytesReader`, 16KB) — defense-in-depth against an oversized
+body being read in full before `ShouldBindJSON` ever gets to reject it, independent of whatever cap
+the gateway/mesh applies:
 
 1. Validate `level.Valid()`, `len(reason) <= 500`, `expiresAt` in the future (or nil) — domain
    errors, no I/O.
 2. `s.checker.Exists(ctx, tenantID, userID)` — the **one** synchronous outbound call this whole
    service makes. Any network error, timeout, or non-2xx → `RecordGrantCheck(ctx, "unavailable")`
    + `503 core_unavailable`, fails **closed**, never defaults to allowing the grant (TAC-FAIL-1).
+   This includes a **contract violation**, not just connectivity failures: if Core responds
+   `active:true` without a `tenant_membership_id` (or with a nil UUID for it), `HTTPChecker.Exists`
+   itself returns an error rather than a placeholder zero UUID — `tenant_membership_id` is
+   `NOT NULL` and is the one field that replaces the composite FK this table lost, so a response
+   missing it must never be treated as a successful check.
    `!active` → `RecordGrantCheck(ctx, "not_active")` + `422 grantee_not_active_member` (collapses
    `iam-org-membership`'s previously-distinct 404/422 into one code — the new provider contract
    only distinguishes active/not-active).
@@ -46,16 +64,17 @@
 `TenantMembershipsPurged` event (Core's rename of its former `TenantOffboarded`, ADR-0008) → own
 span `OffboardingConsumer.Handle`:
 
-1. Idempotency check-before: `processedEvents.IsProcessed(ctx, eventID)` (consumer
-   `tenant_lifecycle_cleanup`) — if already processed, ack and skip.
-2. `repo.CascadeDeleteForTenant(ctx, tenantID)` — hard `DELETE FROM tender_acl_entries WHERE
-   tenant_id=$1`. **Idempotent by construction**: a repeat delete on an already-cleared tenant is a
+1. Idempotency `skipDuplicate`: `processedEvents.IsProcessed(ctx, eventID)` (consumer
+   `tenant_lifecycle_cleanup`) — if already processed, increment
+   `tender_acl_processed_events_duplicates_total` and ack.
+2. One `TxRunner` transaction (tenant GUC bound first): `repo.CascadeDeleteForTenant` +
+   `processedEvents.MarkProcessed` join the same commit (IDEMP-2). **Idempotent by construction**: a repeat delete on an already-cleared tenant is a
    safe no-op — a delayed or even indefinitely-failed cascade is never a live authorization risk
    (TAC-EVT-4), since TAC-4 answers `has_access:false` for a tenant with no rows regardless of
-   whether the cascade ever ran.
-3. `processedEvents.MarkProcessed(ctx, eventID)` mark-after.
-4. `tender_acl_tenant_offboarding_cascade_total{result}` metric either way.
-5. No explicit cache invalidation here — any cached `tac:acl:*` entries for the offboarded tenant
+   whether the cascade ever ran. Unknown event types go through `ackUnknown` (metric +
+   `MarkProcessed`) so redelivery does not storm.
+3. `tender_acl_tenant_offboarding_cascade_total{result}` metric either way.
+4. No explicit cache invalidation here — any cached `tac:acl:*` entries for the offboarded tenant
    simply expire within the 30s TTL.
 
 ## Member-removal cascade (`MemberRemovalConsumer`, ADR-0007 Wave 3 Phase 3)
@@ -63,7 +82,7 @@ span `OffboardingConsumer.Handle`:
 `MembershipRevoked` event (Core's rename/consolidation of its former `TenantMembershipRemoved`,
 ADR-0008) → own span `MemberRemovalConsumer.Handle`:
 
-1. Same idempotency check-before/mark-after pattern, consumer `member_removal` — independent
+1. Same `skipDuplicate` + one `TxRunner` transaction (cascade + `MarkProcessed`) as offboarding, consumer `member_removal` — independent
    ledger entries from the offboarding consumer (composite PK `(event_id, consumer)`), so the two
    never collide on the same `event_id`.
 2. Reads `env.Subject` as the **removed user's ID** (not the tenant, not the actor).
@@ -89,17 +108,16 @@ error itself is **not** routed through `wrapConnErr` (it's a caller-input proble
 connectivity one). TAC-4 runs under the **target** tenant's GUC, not the caller's — internal routes
 are not RLS-exempt.
 
-`processed_events` operations go through `pool.WithConn(ctx, func(ctx, conn *pgxpool.Conn) error
-{...})` instead — no GUC binding needed, since that table has no RLS.
+`processed_events` operations go through `withPool` (join ambient `TxRunner` tx, or open one)
+instead of `pool.WithConn` — no GUC binding needed on that table, since it has no RLS.
 
 ## Graceful shutdown ordering
 
 Coordinated via `errgroup` in `cmd/tender-acl/main.go`: HTTP server → metrics server → both SQS
 consumers → both cleanup tickers, then finally the Postgres pool. The main pool's shutdown uses
 `pgPool.DrainAndClose(drainCtx)` (a 30s-timeout context), **not** a bare `Close()` — lets
-in-flight queries finish rather than dropping them mid-transaction. The raw pool (built via
-`pgcommon.NewPool`, matching the main pool's `Logger`/`Tracer`/`PGBouncerMode`) follows the same
-pattern.
+in-flight queries finish rather than dropping them mid-transaction. There is a single Postgres
+pool (processed_events shares it).
 
 ## Failure domains (TAC-FAIL-1–3)
 

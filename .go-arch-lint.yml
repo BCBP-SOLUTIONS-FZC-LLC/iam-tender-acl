@@ -23,7 +23,7 @@ excludeFiles:
 # core/service, adapter/inbound | adapter/outbound), matching every sibling
 # IAM service (iam-org-membership, iam-catalog-admin, iam-group-mapping).
 # This supersedes the flat, deliberately unlayered structure this service
-# originally shipped with (tender-acl-service-lld.md §6, decision TAC-D1) —
+# originally shipped with (docs/lld/iam-lld-tender-acl-service.md §6, decision TAC-D1) —
 # see ARCHITECTURE.md's "Layer model" section for that history.
 components:
   domain:

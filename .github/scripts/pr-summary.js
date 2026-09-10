@@ -1,7 +1,7 @@
 // Posts or updates a single PR comment summarising CI job results.
 // Invoked by ci.yml via actions/github-script script-path (keeps JS out of YAML).
 const needs = JSON.parse(process.env.NEEDS_JSON || '{}');
-const coverageThreshold = process.env.COVERAGE_THRESHOLD || '70';
+const coverageThreshold = process.env.COVERAGE_THRESHOLD || '85';
 
 function icon(r) {
   if (r === 'success') return '✅';

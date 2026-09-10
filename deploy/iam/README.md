@@ -19,7 +19,8 @@ serviceAccount:
 ## What iam-tender-acl needs (and does NOT need)
 
 This service is the system of record for `tender_acl_entries` and a
-receive-only consumer of `TenantOffboarded`. It does **not** publish any
+receive-only consumer of `TenantMembershipsPurged` and `MembershipRevoked`.
+It does **not** publish any
 event (there is no outbox, no SNS producer, and no Glue schema
 registration anywhere in this codebase, per TAC-EVT-1/TAC-D5), does
 **not** store binary blobs, does **not** encrypt anything with a
@@ -42,9 +43,9 @@ not IAM. If you find yourself adding `sns:Publish`, `s3:*`, `glue:*`, or
 ## Explicitly out of scope
 
 - **No SNS.** This service publishes zero events. It consumes
-  `TenantOffboarded` and `TenantMembershipRemoved` and nothing else.
+  `TenantMembershipsPurged` and `MembershipRevoked` and nothing else.
 - **No Glue Schema Registry.** There is no schema governance step here —
-  `api/asyncapi.yaml` documents the one consumed event by hand (LLD §10.4).
+  `api/asyncapi.yaml` documents the two consumed events by hand (LLD §10.4).
 - **No S3.** Never read, written, or listed.
 - **No KMS.** RDS-at-rest encryption uses an AWS-managed key; the pod does
   not participate. No client-side envelope encryption is performed.

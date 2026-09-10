@@ -2,7 +2,7 @@ package domain
 
 import "errors"
 
-// Error codes, matching tender-acl-service-lld.md §20 (Appendix: Error
+// Error codes, matching docs/lld/iam-lld-tender-acl-service.md §20 (Appendix: Error
 // Taxonomy) verbatim. The HTTP adapter's respondACLError is the single
 // place that maps these to status codes. optimistic_lock_conflict is
 // returned by Revoke on a record_version mismatch, per LLD §11.2/§12.1.

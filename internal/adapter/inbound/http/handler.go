@@ -2,6 +2,8 @@ package http
 
 import (
 	"net/http"
+	"strconv"
+	"strings"
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
@@ -9,6 +11,7 @@ import (
 	"github.com/BCBP-SOLUTIONS-FZC-LLC/iam-tender-acl/internal/core/domain"
 	"github.com/BCBP-SOLUTIONS-FZC-LLC/iam-tender-acl/internal/core/service"
 	gincommon "github.com/BCBP-SOLUTIONS-FZC-LLC/platform-gincommon/pkg/gincommon"
+	pgcommon "github.com/BCBP-SOLUTIONS-FZC-LLC/platform-pgcommon/pkg/pgcommon"
 )
 
 // Handler implements TAC-1/TAC-2/TAC-3 (public, role-gated) and
@@ -39,7 +42,7 @@ func parseUUIDParam(c *gin.Context, name string) (uuid.UUID, bool) {
 // This check is deliberately NOT delegated to platform-gincommon's
 // RequirePermission middleware: that middleware requires a port.Authorizer
 // and responds via its own generic denial path, which does not match
-// tender-acl-service-lld.md §20's single insufficient_role code for every
+// docs/lld/iam-lld-tender-acl-service.md §20's single insufficient_role code for every
 // authz-boundary failure on these routes (tenant mismatch or role
 // mismatch alike).
 func requireSameTenant(c *gin.Context, tenantID uuid.UUID) bool {
@@ -69,12 +72,20 @@ func writeError(c *gin.Context, status int, code string) {
 }
 
 // respondACLError translates a domain.Error's code into the correct
-// HTTP status per tender-acl-service-lld.md §20, and writes the standard
+// HTTP status per docs/lld/iam-lld-tender-acl-service.md §20, and writes the standard
 // error envelope. Errors with no recognized code are treated as
 // internal_server_error, never leaking implementation detail.
 func respondACLError(c *gin.Context, err error) {
 	code, ok := domain.CodeOf(err)
 	if !ok {
+		// Raw pgconn.PgError that wrapConnErr missed. Maps SQLSTATE
+		// 08/53/57/58 to 503 dependency_unavailable without importing
+		// pgconn — same fallback iam-org-membership / iam-realm-provisioner
+		// HandleError uses.
+		if pgcommon.IsConnectionException(err) || pgcommon.IsInsufficientResources(err) || isOperatorOrSystemErrorSQLState(err) {
+			writeError(c, http.StatusServiceUnavailable, domain.ErrCodeDependencyUnavailable)
+			return
+		}
 		writeError(c, http.StatusInternalServerError, domain.ErrCodeInternal)
 		return
 	}
@@ -97,14 +108,82 @@ func respondACLError(c *gin.Context, err error) {
 	writeError(c, status, code)
 }
 
+// isOperatorOrSystemErrorSQLState reports whether err is a Postgres error
+// in SQLSTATE class 57 or 58. pgcommon v1.3.0 has dedicated helpers for
+// 08/53 but not these two; we classify via the pgconn Error() text so
+// this inbound package never imports pgconn. Mirrors iam-org-membership /
+// iam-realm-provisioner's identical HandleError helper.
+func isOperatorOrSystemErrorSQLState(err error) bool {
+	if !pgcommon.IsPgError(err) {
+		return false
+	}
+	msg := err.Error()
+	return strings.Contains(msg, "SQLSTATE 57") || strings.Contains(msg, "SQLSTATE 58")
+}
+
+// maxRequestBodyBytes bounds TAC-2/TAC-3's request body — neither request
+// shape (GrantRequest/RevokeRequest) legitimately needs more than a few
+// hundred bytes; this is defense-in-depth against an oversized body being
+// read in full before ShouldBindJSON ever gets to reject it, independent of
+// whatever cap the gateway/mesh in front of this service applies.
+const maxRequestBodyBytes = 16 * 1024
+
+// limitRequestBody wraps the request body in http.MaxBytesReader so a body
+// exceeding maxRequestBodyBytes fails during ShouldBindJSON's read instead
+// of being buffered in full first.
+func limitRequestBody(c *gin.Context) {
+	c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, maxRequestBodyBytes)
+}
+
+// defaultListLimit/maxListLimit bound TAC-1's page size: unbounded listing
+// let a tender with a large ACL history return every row in one response.
+// defaultListLimit applies when the caller omits ?limit; maxListLimit is a
+// hard ceiling regardless of what the caller requests.
+const (
+	defaultListLimit = 100
+	maxListLimit     = 500
+)
+
+// parseListPagination reads ?limit=&offset= from the query string, applying
+// defaultListLimit/clamping to maxListLimit and rejecting a negative or
+// non-integer value as invalid_request. Returns ok=false after already
+// writing the error response.
+func parseListPagination(c *gin.Context) (limit, offset int, ok bool) {
+	limit = defaultListLimit
+	if raw := c.Query("limit"); raw != "" {
+		v, err := strconv.Atoi(raw)
+		if err != nil || v < 1 {
+			writeError(c, http.StatusBadRequest, domain.ErrCodeInvalidRequest)
+			return 0, 0, false
+		}
+		limit = v
+	}
+	if limit > maxListLimit {
+		limit = maxListLimit
+	}
+
+	offset = 0
+	if raw := c.Query("offset"); raw != "" {
+		v, err := strconv.Atoi(raw)
+		if err != nil || v < 0 {
+			writeError(c, http.StatusBadRequest, domain.ErrCodeInvalidRequest)
+			return 0, 0, false
+		}
+		offset = v
+	}
+	return limit, offset, true
+}
+
 // List implements TAC-1.
 //
 // @Summary      TAC-1 — List tender ACL entries
-// @Description  Every active-or-not entry for a tender, ordered by created_at. Not cached.
+// @Description  Every active-or-not entry for a tender, ordered by created_at, paginated (default limit 100, max 500). Not cached.
 // @Tags         public
 // @Produce      json
-// @Param        id         path      string  true  "Tenant UUID"  format(uuid)
-// @Param        tender_id  path      string  true  "Tender UUID"  format(uuid)
+// @Param        id         path      string  true   "Tenant UUID"  format(uuid)
+// @Param        tender_id  path      string  true   "Tender UUID"  format(uuid)
+// @Param        limit      query     int     false  "Page size (default 100, max 500)"
+// @Param        offset     query     int     false  "Rows to skip (default 0)"
 // @Success      200        {object}  ListResponse
 // @Failure      400        {object}  ErrorResponse
 // @Failure      403        {object}  ErrorResponse
@@ -125,13 +204,17 @@ func (h *Handler) List(c *gin.Context) {
 	if !ok {
 		return
 	}
+	limit, offset, ok := parseListPagination(c)
+	if !ok {
+		return
+	}
 
-	entries, err := h.svc.List(c.Request.Context(), tenantID, tenderID)
+	entries, err := h.svc.List(c.Request.Context(), tenantID, tenderID, limit, offset)
 	if err != nil {
 		respondACLError(c, err)
 		return
 	}
-	c.JSON(http.StatusOK, ListResponse{Entries: toACLResponses(entries)})
+	c.JSON(http.StatusOK, ListResponse{Entries: toACLResponses(entries), Limit: limit, Offset: offset})
 }
 
 // Grant implements TAC-2.
@@ -168,6 +251,7 @@ func (h *Handler) Grant(c *gin.Context) {
 		return
 	}
 
+	limitRequestBody(c)
 	var req GrantRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
 		writeError(c, http.StatusBadRequest, domain.ErrCodeInvalidRequest)
@@ -238,6 +322,7 @@ func (h *Handler) Revoke(c *gin.Context) {
 		return
 	}
 
+	limitRequestBody(c)
 	var req RevokeRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
 		writeError(c, http.StatusBadRequest, domain.ErrCodeInvalidRequest)

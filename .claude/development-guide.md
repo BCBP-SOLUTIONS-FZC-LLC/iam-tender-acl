@@ -1,6 +1,6 @@
 # Development guide
 
-## Key design decisions (decision register, LLD §23)
+## Key design decisions (decision register, LLD §26)
 
 | # | Decision |
 |---|---|
@@ -9,10 +9,14 @@
 | TAC-D3 | TAC-1/TAC-4 need no membership join, no cross-service call — only TAC-2 does. |
 | TAC-D4 | FK loss is low-risk because the active-grant predicate (TAE-3) was never conditioned on live membership status; AuthZ Enrichment's I-8 gate provides read-time safety independently. |
 | TAC-D5 | No new event introduced for grant/revoke — preserves the source's "no bus event" posture. |
-| TAC-D6 | Wave-4 entry criteria written down now, per ADR-0007 Action Item 7 (LLD §22). |
+| TAC-D6 | Wave-4 entry criteria written down now, per ADR-0007 Action Item 7 (LLD §25). |
 | TAC-D7 | Second FK loss (`fk_tae_tenant ON DELETE CASCADE`) replaced by an async SQS subscription, not a second synchronous check — mirrors Wave-2's GM-D2. |
 | TAC-D8 | No `rls_check_tenant()`/`rls_violation_log` forensic-logging wrapper — deliberate scope reduction, mirrors Wave-2's GM-D8. |
 | TAC-D9 | This LLD revision adopts the canonical section template and repoints broken cross-references from earlier drafts; requirement IDs preserved, only relocated. |
+| TAC-D10 | A second inbound event, `MembershipRevoked` on its own queue (`member-removal-tenderacl-q`), soft-deletes (not hard-deletes) a removed user's rows within the affected tenant — independent queue/DLQ from tenant-offboarding, ADR-0007 Wave 3 Phase 3. |
+| TAC-D11 | The grant-time membership-check response contract is `{"active": true, "tenant_membership_id": "<uuid>"}` / `{"active": false}`, not a bare boolean — `tenant_membership_id` is `NOT NULL` and replaces the composite FK this table lost. `HTTPChecker.Exists` now actually enforces this: a response missing `tenant_membership_id` on `active:true` fails closed rather than defaulting to a zero UUID. |
+| TAC-D12 | Catch-up, not a new decision: event names brought in line with `iam-org-membership`'s ADR-0008 rename (`TenantOffboarded`→`TenantMembershipsPurged`, `TenantMembershipRemoved`→`MembershipRevoked`) after this service's own code had already shipped against the new names. |
+| TAC-D13 | TAC-1 (list) is paginated (`?limit=`/`?offset=`, default 100, hard ceiling 500) — added after a production-readiness audit found an unbounded response was a real gap, not merely theoretical. |
 
 ## Extending the service
 
@@ -72,10 +76,18 @@ workflow gates on this.
   swallowed, never propagated as request errors — match this for any new cache interaction.
 - Fail closed, not open, on any synchronous outbound dependency error — this is the one rule that
   must never be relaxed for TAC-2's membership check, and should be the default assumption for any
-  future synchronous call this service adds.
-- Idempotency for consumers is check-before/mark-after against `processed_events`, keyed by
-  `(event_id, consumer)` — reuse this pattern (with a new `consumer` value) rather than inventing a
-  new dedup mechanism per consumer.
+  future synchronous call this service adds. This includes **contract violations**, not just
+  connectivity failures: a well-formed-but-invalid response (e.g. `active:true` missing
+  `tenant_membership_id`) must fail closed too, never be papered over with a placeholder value.
+- Any new list-style endpoint should be paginated from the start (`?limit=`/`?offset=`, validated
+  and clamped in the handler, not left to the repository layer) — TAC-1 originally wasn't, and an
+  unbounded response was a real production-readiness gap, not a theoretical one.
+- Any new admin-mutating endpoint should get `limitRequestBody` (`http.MaxBytesReader`) applied,
+  matching TAC-2/TAC-3 — cheap defense-in-depth regardless of what the gateway/mesh already caps.
+- Idempotency for consumers is `skipDuplicate` then cascade + `MarkProcessed` in one `TxRunner`
+  transaction against `processed_events`, keyed by `(event_id, consumer)` — reuse this pattern
+  (with a new `consumer` value) rather than inventing a new dedup mechanism per consumer.
+  Unknown types go through `ackUnknown` (metric + mark) so redelivery does not storm.
 
 ## Appendix — error codes
 
@@ -95,7 +107,9 @@ workflow gates on this.
 | `internal_server_error` | 500 | unclassified failure |
 
 ---
-Document reflects `iam-tender-acl` as of 2026-08-25 (ADR-0007 Wave 3: Phases 1–3, 6–7 executed;
-Phases 4–5 partially executed — see `tender-acl-service-lld.md` §21 for what's real vs. not
-executable in this workspace. This service has never been deployed to a real staging/production
-environment.)
+Document reflects `iam-tender-acl` as of 2026-09-10 (ADR-0007 Wave 3: Phases 1–3, 6–7 executed;
+Phases 4–5 partially executed — see `docs/lld/iam-lld-tender-acl-service.md` §24 for what's real vs. not
+executable in this workspace. A production-readiness audit and remediation pass has since landed
+(TAC-D13, pagination; the membershipcheck fail-closed fix; a missing index; a broken Docker build
+fixed; CI/deploy-gate hardening — see `CHANGELOG.md`/`VERSIONING.md`). This service has never been
+deployed to a real staging/production environment.)

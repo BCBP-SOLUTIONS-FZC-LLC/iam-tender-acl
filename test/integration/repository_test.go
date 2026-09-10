@@ -169,7 +169,7 @@ func TestRepository_List_IncludesExpiredButNotRevoked(t *testing.T) {
 	require.NoError(t, err)
 	require.NoError(t, repo.Revoke(ctx, tenantID, tenderID, revokedUser, revokedCreated.RecordVersion))
 
-	entries, err := repo.List(ctx, tenantID, tenderID)
+	entries, err := repo.List(ctx, tenantID, tenderID, 100, 0)
 	require.NoError(t, err)
 	assert.Len(t, entries, 1, "list must include the passively-expired entry (TAE-7) but not the revoked one (TAE-4)")
 }
@@ -194,7 +194,7 @@ func TestRepository_CascadeDeleteForTenant_RemovesOnlyThatTenant(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, int64(1), deleted)
 
-	remaining, err := repo.List(ctx, tenantB, uuid.Nil)
+	remaining, err := repo.List(ctx, tenantB, uuid.Nil, 100, 0)
 	require.NoError(t, err)
 	_ = remaining // tenant B's row exists under a different tender_id; existence is what matters
 
@@ -279,4 +279,46 @@ func TestRepository_SoftDeleteForUser_Idempotent(t *testing.T) {
 	second, err := repo.SoftDeleteForUser(ctx, tenantID, userID)
 	require.NoError(t, err)
 	assert.Equal(t, int64(0), second, "second call must find no active rows left to soft-delete")
+}
+
+// TestRepository_List_NegativeOffset_ReturnsQueryError covers List's real
+// query-error branch: the HTTP layer (parseListPagination) already rejects
+// a negative offset before it ever reaches this repository method, but the
+// repository itself has no such guard — a negative OFFSET is a genuine
+// Postgres error ("OFFSET must not be negative"), not merely a theoretical
+// one, so a caller that bypasses the handler must still get a real error
+// back rather than a silently-wrong result. pgx defers query execution to
+// the first row fetch, so this surfaces via collectEntries's rows.Err()
+// return, not the immediate post-Query error check.
+func TestRepository_List_NegativeOffset_ReturnsQueryError(t *testing.T) {
+	cleanupTable(t)
+	ctx := context.Background()
+	tenantID, tenderID := uuid.New(), uuid.New()
+
+	_, err := repo.List(ctx, tenantID, tenderID, 100, -1)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "OFFSET must not be negative")
+}
+
+// TestRepository_Grant_ReasonExceedsCheckConstraint_ReturnsGenericInsertError
+// covers Grant's generic (non-unique-violation) insert-error branch: the
+// database-layer CHECK constraint on `reason` (<= 500 chars, LLD §7.2.1) is
+// a second, independent enforcement point beyond the API-layer validation —
+// a caller that bypasses the handler must still get a real error, not a
+// silently-truncated or accepted row.
+func TestRepository_Grant_ReasonExceedsCheckConstraint_ReturnsGenericInsertError(t *testing.T) {
+	cleanupTable(t)
+	ctx := context.Background()
+	tooLong := make([]byte, 501)
+	for i := range tooLong {
+		tooLong[i] = 'x'
+	}
+
+	_, err := repo.Grant(ctx, domain.TenderACLEntry{
+		TenantID: uuid.New(), TenderID: uuid.New(), UserID: uuid.New(),
+		TenantMembershipID: uuid.New(), AccessLevel: domain.ACLView, GrantedBy: uuid.New(),
+		Reason: string(tooLong),
+	})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "insert tender_acl_entries")
 }

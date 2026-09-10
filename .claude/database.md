@@ -4,15 +4,15 @@
   service's `docker-compose.yml` stack can run side-by-side with sibling repos' own stacks).
 - **Tables**: exactly two — `tender_acl_entries` (the one domain table, RLS-enforced) and
   `processed_events` (the shared idempotency ledger, not tenant-scoped, no RLS).
-- **Pool**: `platform-pgcommon`'s `pgcommon.Pool` — two separate pools in `main.go`, both built via
-  `pgcommon.NewPool`, both with `PGBouncerMode: true` forced unconditionally (`PG_BOUNCER_MODE` env
-  var is deliberately *not* read — transaction-scoped RLS GUCs are required regardless of topology):
-  - **App pool** (`DATABASE_URL`, role `tender_acl_app`, no `BYPASSRLS`) — every
-    `tender_acl_entries` read/write, gated through `GUCProvider: pgcommon.GUCSetFromContext` /
-    `pgcommon.WithValidatedGUCSet`.
-  - **Raw pool** (`MIGRATION_DATABASE_URL` fallback to `DATABASE_URL` at startup; separately, a
-    `processed_events`-only pool built on the admin DSN in tests) — no `GUCProvider`, since
-    `processed_events` has no RLS.
+- **Pool**: `platform-pgcommon`'s `pgcommon.Pool` — one pool in `main.go`, built via
+  `pgcommon.NewPool` with `PGBouncerMode: true` forced unconditionally (`PG_BOUNCER_MODE` env
+  var is deliberately *not* read — transaction-scoped RLS GUCs are required regardless of topology).
+  The app pool (`DATABASE_URL`, role `tender_acl_app`, no `BYPASSRLS`) serves both
+  `tender_acl_entries` (gated through `GUCProvider: pgcommon.GUCSetFromContext` /
+  `pgcommon.WithValidatedGUCSet`) and `processed_events` (no RLS; `withPool` joins an ambient
+  `TxRunner` transaction so cascade + `MarkProcessed` commit together — IDEMP-2).
+  `LedgerPoolConfig` remains the siblings' `SystemPoolConfig` helper for tests / a future no-GUC
+  pool; it is not a BYPASSRLS sysPool and production no longer opens a second pool.
 - **Migrations**: run by the binary itself at startup (`RunMigrations` → `pgmigrate.Runner{FS, DSN,
   Logger}.Up(ctx)`), no separate migrate Job/service to wait on. `make migrate-up`/`migrate-down`/
   `migrate-create` (standalone golang-migrate CLI, `DATABASE_MIGRATION_URL`) are for manual/CI use
@@ -42,7 +42,12 @@ database split — see "What was lost" below.
 
 Indexes: `uq_tae_active_entry` UNIQUE `(tenant_id, tender_id, user_id) WHERE deleted_at IS NULL`
 (TAE-1: at most one active grant per tenant/tender/user), plus `idx_tae_tenant_tender`,
-`idx_tae_user` (both partial on `deleted_at IS NULL`), `idx_tae_membership`.
+`idx_tae_user` (both partial on `deleted_at IS NULL`), `idx_tae_membership`, and
+`idx_tae_tenant_all` on `(tenant_id)` — deliberately **non-partial**, unlike the three above: the
+tenant-offboarding cascade delete (`CascadeDeleteForTenant`) deletes every row for a tenant,
+including already-soft-deleted ones retained for audit, so a `WHERE deleted_at IS NULL` partial
+index can't cover it. Added after a production-readiness audit found the cascade forced a
+sequential scan under its own write transaction once a tenant had any revoke history.
 
 Trigger `trg_touch_tae` (name per LLD §7.5 verbatim — differs from `iam-org-membership`'s
 `trg_touch_tender_acl_entries`; the LLD name wins) — `BEFORE UPDATE ... FOR EACH ROW WHEN (OLD.* IS
@@ -118,14 +123,19 @@ roles + grants.
 ## DSN resolution and slow-query / pool tuning
 
 `internal/adapter/outbound/postgres/db.go`'s `DSNFromEnv`/`ApplyStatementTimeout`/
-`MigrationDSNFromEnv` are the single DSN-assembly path for both pools and the migration runner —
-mirroring `iam-user-profile`'s and `iam-org-membership`'s identical helpers, so DSN assembly has
-exactly one implementation instead of a second one hand-rolled in `cmd/tender-acl`. `PG_STATEMENT_TIMEOUT`
-(a Go duration, e.g. `5s`) is appended as a server-side `statement_timeout` — but only when the DSN
-is assembled from `PG_*` vars, not when `DATABASE_URL` is set directly (its query string is passed
-through verbatim, matching the same rule both siblings apply).
+`MigrationDSNFromEnv`/`LedgerPoolConfig` are the single DSN-assembly and SystemPoolConfig-pattern
+path (LedgerPoolConfig is kept for tests / a future no-GUC pool; production uses one app pool so
+cascade + MarkProcessed can share a transaction) — mirroring `iam-org-membership`'s and
+`iam-realm-provisioner`'s identical helpers, so
+DSN assembly has exactly one implementation instead of a second one hand-rolled in `cmd/tender-acl`.
+`PG_STATEMENT_TIMEOUT` (a Go duration, e.g. `5s`) is appended as a server-side `statement_timeout`
+— when the DSN is assembled from `PG_*` vars, and also onto `MIGRATION_DATABASE_URL` (idempotent if the DSN already carries `statement_timeout`). Not appended when `DATABASE_URL`
+is set directly for the app DSN (its query string is passed through verbatim, matching the same
+rule both siblings apply). `pgmetrics.InitWithRegisterer` registers pool/query collectors on
+gincommon's registerer. `wrapConnErr` remaps SQLSTATE class 08/53/57/58 and `puddle.ErrClosedPool`
+to `dependency_unavailable`; unrecognized business errors pass through.
 
-`PG_MAX_CONNS=10`, `PG_MIN_CONNS=2`, `PG_SLOW_QUERY_THRESHOLD=200ms` — read via
-`pgcommon.ConfigFromEnv()`, safe to omit (library defaults apply). `/readyz` surfaces pool
-utilization (`total_conns`/`idle_conns`/`acquired_conns`/`max_conns`/`utilization`) via
-`pgcommon.Pool.Health(ctx)`.
+`PG_MAX_CONNS=10`, `PG_MIN_CONNS=0`, `PG_SLOW_QUERY_THRESHOLD=200ms` — read via
+`pgcommon.ConfigFromEnv()`, inherited by **both** pools (`MinConns` then forced `0` because
+`PGBouncerMode` is forced true). `/readyz` surfaces pool utilization (`total_conns`/`idle_conns`/`acquired_conns`/`max_conns`/
+`utilization`) via `pgcommon.Pool.Health(ctx)`.

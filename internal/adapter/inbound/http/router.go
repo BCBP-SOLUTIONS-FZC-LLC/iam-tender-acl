@@ -2,13 +2,13 @@ package http
 
 import (
 	"net/http"
+	"time"
 
 	"github.com/gin-gonic/gin"
 
 	swaggerFiles "github.com/swaggo/files"
 	ginSwagger "github.com/swaggo/gin-swagger"
 
-	"github.com/BCBP-SOLUTIONS-FZC-LLC/iam-tender-acl/internal/core/port"
 	gincommon "github.com/BCBP-SOLUTIONS-FZC-LLC/platform-gincommon/pkg/gincommon"
 )
 
@@ -41,43 +41,46 @@ type Router struct {
 // via RequestContext.Roles), the internal mTLS-only access-check API
 // (TAC-4, no RBAC — tenant isolation from RLS alone), and the health
 // checks.
-func NewRouter(h *Handler, postgres PostgresHealth, cache Pinger, logger port.Logger, tracing *gincommon.TracingOptions, docs DocsConfig) *Router {
+func NewRouter(h *Handler, postgres PostgresHealth, cache Pinger, ginCfg gincommon.Config, docs DocsConfig) *Router {
 	gin.SetMode(gin.ReleaseMode)
 	engine := gin.New()
 
-	// logger already matches gincommon's own port.Logger shape exactly
-	// (Debug/Info/Warn/Error(msg, map[string]any)) — it's the same
-	// Zap-backed logger built once via platform-gincommon's
-	// logger.NewLogger in cmd/tender-acl/main.go, so no adapter is needed
-	// here, unlike the *slog.Logger this used to wrap.
-	cfg := gincommon.Config{Logger: logger, ServiceName: "tender-acl", Tracing: tracing}
+	// ServiceName is required by ObservabilityMiddlewares (empty panics —
+	// invalid Prometheus labels). Tests that never go through main.go
+	// still need a name; production always passes ginCfg from the
+	// composition root, already primed there so metrics.Init is a
+	// sync.Once no-op here.
+	if ginCfg.ServiceName == "" {
+		ginCfg.ServiceName = "tender-acl"
+	}
+	// 30s hard deadline on every request — gincommon's TimeoutMiddleware,
+	// matching iam-org-membership / iam-realm-provisioner. Must run before
+	// ObservabilityMiddlewares so a timeout is recorded on
+	// http_request_timeout_total rather than hanging until the handler
+	// returns.
+	engine.Use(gincommon.TimeoutMiddleware(30 * time.Second))
 	// Observability (recovery/request-id/tracing/metrics/correlation/logging)
 	// applies to every route, including TAC-4. Auth (ProtectedMiddlewares)
 	// applies only to the public admin group below — TAC-4 is a mesh-only
 	// trust boundary with no RBAC/JWT check (LLD §8.2/§13.2).
 	//
-	// Tracing comes entirely from gincommon's own TracingMiddleware here
-	// (part of ObservabilityMiddlewares), which lazily installs a real OTel
-	// TracerProvider (via cfg.Tracing) the first time this function runs —
-	// NOT a separate otelgin.Middleware or a hand-rolled TracerProvider in
-	// cmd/tender-acl, both since removed as redundant with what gincommon
-	// already provides.
+	// Tracing comes entirely from gincommon: cmd/tender-acl/main.go calls
+	// gincommon.InitTracing at process start so in-process spans get valid
+	// trace IDs even before this engine is built, then ObservabilityMiddlewares
+	// attaches TracingMiddleware. EnsureInitTelemetry is a no-op once the
+	// SDK provider is already installed. There is no separate otelgin
+	// middleware or hand-rolled TracerProvider in this process.
 	//
 	// Generic per-request HTTP metrics (count/duration/status, by
 	// method+route) are gincommon's own http_requests_total/
-	// http_request_duration_seconds (also part of ObservabilityMiddlewares'
-	// MetricsMiddleware) — passed through as-is, not duplicated by a local
-	// metricsMiddleware. This service is not yet deployed, so there was no
-	// live dependency on the old tender_acl_requests_total/
-	// tender_acl_request_duration_seconds names to preserve; deploy/monitoring's
-	// SLO/alert/HPA rules and the release canary check were updated to the
-	// gincommon names in the same change. internal/adapter/outbound/metrics
+	// http_request_duration_seconds (ObservabilityMiddlewares'
+	// MetricsMiddleware) — passed through as-is. internal/adapter/outbound/metrics
 	// still owns every metric gincommon has no equivalent for — writes,
 	// grant checks, cache hits/misses, and both cascades.
-	engine.Use(gincommon.ObservabilityMiddlewares(cfg)...)
+	engine.Use(gincommon.ObservabilityMiddlewares(ginCfg)...)
 
 	public := engine.Group("/api/v1/tenants/:id/tenders/:tender_id/acl")
-	public.Use(gincommon.ProtectedMiddlewares(cfg)...)
+	public.Use(gincommon.ProtectedMiddlewares(ginCfg)...)
 	public.Use(ContextBridgeMiddleware())
 	public.GET("", h.List)
 	public.POST("", h.Grant)

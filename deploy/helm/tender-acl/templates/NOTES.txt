@@ -1,9 +1,23 @@
 iam-tender-acl {{ .Chart.Version }} deployed.
 
 This service is interim (ADR-0007 Option D — scheduled to merge into the
-Tender Service; see MIGRATION_RUNBOOK.md).
+Tender Service; see docs/lld/iam-lld-tender-acl-service.md §24).
 
 ━━ REQUIRED ACTIONS ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+⚠  VALKEY_ADDR ({{ .Values.env.VALKEY_ADDR }}) and CORE_INTERNAL_BASE_URL
+   ({{ .Values.env.CORE_INTERNAL_BASE_URL }}) are chart DEFAULTS shaped for
+   this repo's own dev-cluster naming convention (Service "valkey" in
+   namespace "tender-acl"; iam-org-membership deployed as Service
+   "org-membership" in namespace "iam"). A `helm install` with these
+   defaults in a cluster using different Service/namespace names will
+   "succeed" while silently pointing at the wrong host: Valkey caching
+   silently degrades to always-miss (fail-open, LLD §9.4), but
+   CORE_INTERNAL_BASE_URL being wrong makes EVERY TAC-2 grant fail closed
+   (503 core_unavailable, LLD §7.6.2) — verify both resolve correctly for
+   this cluster before relying on this release, e.g.:
+     kubectl run -it --rm debug --image=busybox --restart=Never -- \
+       nslookup {{ (splitList ":" .Values.env.VALKEY_ADDR) | first }}
 
 {{ if not .Values.existingSecret -}}
 ⚠  Credentials are stored in Helm release history (base64, not encrypted).
