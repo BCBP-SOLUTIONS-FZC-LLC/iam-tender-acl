@@ -202,3 +202,26 @@ func TestMemberRemovalConsumer_Handle_DuplicateDelivery_CascadesOnce(t *testing.
 	).Scan(&processedCount))
 	assert.Equal(t, 1, processedCount, "duplicate delivery must not create a second processed_events row")
 }
+
+// ── ProcessedEvents error paths (canceled context → pool.WithConn fails) ─────
+
+func TestProcessedEvents_IsProcessed_Error(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	_, err := processedEvents.IsProcessed(ctx, uuid.New())
+	assert.Error(t, err)
+}
+
+func TestProcessedEvents_MarkProcessed_Error(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	err := processedEvents.MarkProcessed(ctx, uuid.New())
+	assert.Error(t, err)
+}
+
+func TestProcessedEvents_CleanupExpired_Error(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	_, err := processedEvents.CleanupExpired(ctx)
+	assert.Error(t, err)
+}

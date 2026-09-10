@@ -67,3 +67,14 @@ func TestFieldMap_Empty(t *testing.T) {
 	got := fieldMap(nil)
 	assert.Equal(t, map[string]any{}, got)
 }
+
+// TestLoggerAdapter_Info_NoFields covers Info called with zero variadic
+// fields (fieldMap(nil) via the empty-slice path), distinct from
+// TestNewLoggerAdapter_WrapsLogger which always passes at least one field.
+func TestLoggerAdapter_Info_NoFields(t *testing.T) {
+	fl := &recordingPortLogger{}
+	a := NewLoggerAdapter(fl)
+	a.Info("imsg")
+	assert.Equal(t, "info", fl.level)
+	assert.Equal(t, "imsg", fl.msg)
+}

@@ -206,10 +206,8 @@ When cutting a tagged release:
    make ci   # tidy + fmt-check + vet + lint + test-ci + build
    ```
    Note that `make ci` does **not** include `go-arch-lint` — `go-arch-lint check --project-path .` is
-   run separately in `validate-test.yml` and, as of this writing, fails on a real violation
-   (`internal/adapter/inbound/http/asyncapi.go` importing `api/` without a declared component, and
-   `api/embed.go` unattached to any component in `.go-arch-lint.yml`). Check its output manually
-   before tagging until that's fixed; a red arch-lint run doesn't fail `make ci` by itself.
+   run separately in `validate-test.yml`. Check its output manually before tagging; a red arch-lint
+   run doesn't fail `make ci` by itself.
 
 5. **Create and push an annotated tag** — this is what triggers `release.yml`:
    ```bash

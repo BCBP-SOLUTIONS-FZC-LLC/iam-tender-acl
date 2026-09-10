@@ -93,3 +93,40 @@ func TestValkeyCache_Get_MalformedStoredValue_ReturnsUnmarshalError(t *testing.T
 	assert.False(t, hit)
 	assert.Nil(t, got)
 }
+
+// ── Set: marshal error (time.Time with year > 9999 fails MarshalJSON) ─────────
+
+func TestValkeyCache_Set_MarshalError(t *testing.T) {
+	extreme := time.Date(10000, 1, 1, 0, 0, 0, 0, time.UTC)
+	err := valkeyCache.Set(context.Background(), uuid.New(), uuid.New(), uuid.New(),
+		domain.CachedAccess{ExpiresAt: &extreme})
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "cache: marshal")
+}
+
+// ── Set: client error (canceled context) ────────────────────────────────────
+
+func TestValkeyCache_Set_ClientError(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	err := valkeyCache.Set(ctx, uuid.New(), uuid.New(), uuid.New(), domain.CachedAccess{HasAccess: true})
+	assert.Error(t, err)
+}
+
+// ── Delete: client error (canceled context) ─────────────────────────────────
+
+func TestValkeyCache_Delete_ClientError(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	err := valkeyCache.Delete(ctx, uuid.New(), uuid.New(), uuid.New())
+	assert.Error(t, err)
+}
+
+// ── Ping: client error (canceled context) ───────────────────────────────────
+
+func TestValkeyCache_Ping_ClientError(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	err := valkeyCache.Ping(ctx)
+	assert.Error(t, err)
+}

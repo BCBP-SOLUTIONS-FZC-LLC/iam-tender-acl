@@ -113,11 +113,10 @@ service consumes the real modules via GOPRIVATE, same as everyone else).
 outbound) ← `cmd` (wires everything). `observability` (`internal/adapter/outbound/metrics`) is
 cross-cutting — imported by both inbound HTTP and inbound consumer adapters, not purely an outbound
 concern (metrics span both). `docs_swagger` (`docs/swagger`) is generated-only, no internal deps.
-Enforced via `make lint`'s `go-arch-lint check`. **Known current gap** (tracked in `VERSIONING.md`):
-`go-arch-lint check` fails today — `internal/adapter/inbound/http/asyncapi.go` imports `api/`
-without a declared component, and `api/embed.go` is unattached to any component in
-`.go-arch-lint.yml`. `make ci` does not include this check, so it doesn't block a merge, but it
-should be fixed (add an `api`/`api_spec` component) before relying on it again.
+`api_spec` (`api/`, the compile-time-embedded AsyncAPI spec) is a component of its own —
+`anyVendorDeps`, no internal deps — permitting `adapters_inbound`'s import of it for
+`asyncapi.go`. Enforced via `go-arch-lint check` (not currently wired into `make lint`/`make ci`;
+run it directly with the `go-arch-lint` binary against `.go-arch-lint.yml`).
 
 ## Key files to know
 

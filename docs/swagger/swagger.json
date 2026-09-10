@@ -4,7 +4,8 @@
         "description": "Restricted-tender access overlay, extracted from iam-org-membership per ADR-0007 Wave 3. Owns exactly one resource — tender_acl_entries — behind three admin-gated grant/revoke/list endpoints and one mesh-only authorization check.\n\n**Route prefixes.**  `/api/v1/*` — tenant-admin callers (`tender_admin`/`tenant_admin`/`tenant_owner`, via `x-tenant-roles`).  `/internal/*` — in-mesh service-to-service, mTLS trust boundary only, no RBAC/JWT check at all (LLD §8.2/§13.2).\n\nTAC-4 (the internal check) never returns 404 — a missing grant is a valid, cacheable `has_access:false` answer, not an error.",
         "title": "Tender ACL Service API",
         "contact": {
-            "name": "BCBP Solutions"
+            "name": "BCBP Solutions",
+            "email": "sharmila.dayalan@bcbpsolutions.com"
         },
         "license": {
             "name": "Proprietary"

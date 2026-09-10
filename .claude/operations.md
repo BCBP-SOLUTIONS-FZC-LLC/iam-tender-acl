@@ -159,9 +159,8 @@ or when Prometheus reports zero scrape targets for `up{job=~".*tender-acl.*"}` â
 case silently read as "healthy."
 
 Other workflows: `changelog-check.yml` (CHANGELOG discipline gate), `release.yml`. See
-`VERSIONING.md` for the full release process and two known gaps: a `go-arch-lint check` failure
-(2 real violations, not gated by `make ci`) and `deploy/helm/tender-acl/Chart.yaml`'s
-`version`/`appVersion` mismatch.
+`VERSIONING.md` for the full release process and the one remaining known gap:
+`deploy/helm/tender-acl/Chart.yaml`'s `version`/`appVersion` mismatch.
 
 `make ci` = `tidy fmt-check vet lint test-ci build` â€” the local equivalent of the quality+test gates.
 

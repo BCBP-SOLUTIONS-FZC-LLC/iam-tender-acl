@@ -29,8 +29,8 @@ Extracted from `iam-org-membership` per ADR-0007 Wave 3 — the tender-scoped AC
 - Two independent inbound SQS consumers, each idempotency-gated via a `processed_events` ledger:
   tenant-offboarding cascade-delete (`TenantMembershipsPurged`) and per-user-removal cascade
   soft-delete (`MembershipRevoked`, ADR-0007 Wave 3 Phase 3).
-- `GET /swagger` and `GET /asyncapi`/`GET /asyncapi.yaml` — REST and event contract doc viewers,
-  gated by `DOCS_ENABLED`/`DOCS_AUTH_TOKEN` outside dev.
+- `GET /swagger` (BCBP-branded dark theme) and `GET /asyncapi`/`GET /asyncapi.yaml` — REST and
+  event contract doc viewers, gated by `DOCS_ENABLED`/`DOCS_AUTH_TOKEN` outside dev.
 - Logs, metrics, and tracing via `platform-gincommon`; database access via `platform-pgcommon`
   (RLS GUC injection, connection-error classification, migrations); SQS consumers via
   `platform-events` — the same shared libraries every sibling IAM service uses.
@@ -54,8 +54,5 @@ Extracted from `iam-org-membership` per ADR-0007 Wave 3 — the tender-scoped AC
 - `deploy/helm/tender-acl/Chart.yaml`'s `version` (`0.1.0`) and `appVersion` (`1.0.0`) are
   inconsistent — resolve both to match the first real tag before cutting one (see
   [VERSIONING.md](VERSIONING.md)).
-- `go-arch-lint check` currently fails: `internal/adapter/inbound/http/asyncapi.go` imports `api/`
-  without a declared component, and `api/embed.go` is unattached to any component in
-  `.go-arch-lint.yml`.
 - Nothing here has been deployed to, or soaked against, a real staging/production environment —
   verified only against testcontainers-backed test suites.
