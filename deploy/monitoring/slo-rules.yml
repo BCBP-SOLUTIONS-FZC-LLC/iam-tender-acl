@@ -14,7 +14,7 @@
 #         authorization decision path (Tender Service, AuthZ Enrichment).
 #
 #  SLO-2  Write-path error rate
-#         Target: 99.9% of TAC-2/TAC-3 writes (tender_acl_writes_total)
+#         Target: 99.9% of TAC-2/TAC-3 writes (iam_tender_acl_writes_total)
 #         succeed (result != "error"), excluding intentional 4xx/503
 #         validation and grant-check failures — writes_total is only
 #         incremented after those checks pass, so every recorded "error"
@@ -94,23 +94,23 @@ groups:
       # Write-path error rate across TAC-2 (grant) / TAC-3 (revoke).
       - record: tender_acl:write_error_rate:ratio_rate_5m
         expr: |
-          sum(rate(tender_acl_writes_total{job="tender-acl", result="error"}[5m]))
+          sum(rate(iam_tender_acl_writes_total{service="tender-acl", result="error"}[5m]))
           /
-          clamp_min(sum(rate(tender_acl_writes_total{job="tender-acl"}[5m])), 0.001)
+          clamp_min(sum(rate(iam_tender_acl_writes_total{service="tender-acl"}[5m])), 0.001)
 
       # Tenant offboarding cascade error rate.
       - record: tender_acl:offboarding_error_rate:ratio_rate_5m
         expr: |
-          sum(rate(tender_acl_tenant_offboarding_cascade_total{job="tender-acl", result="error"}[5m]))
+          sum(rate(iam_cascade_operations_total{service="tender-acl", event_type="TenantMembershipsPurged", result="error"}[5m]))
           /
-          clamp_min(sum(rate(tender_acl_tenant_offboarding_cascade_total{job="tender-acl"}[5m])), 0.001)
+          clamp_min(sum(rate(iam_cascade_operations_total{service="tender-acl", event_type="TenantMembershipsPurged"}[5m])), 0.001)
 
       # Per-user-removal ACL cascade error rate (SLO-4).
       - record: tender_acl:member_removal_error_rate:ratio_rate_5m
         expr: |
-          sum(rate(tender_acl_member_removal_cascade_total{job="tender-acl", result="error"}[5m]))
+          sum(rate(iam_cascade_operations_total{service="tender-acl", event_type="MembershipRevoked", result="error"}[5m]))
           /
-          clamp_min(sum(rate(tender_acl_member_removal_cascade_total{job="tender-acl"}[5m])), 0.001)
+          clamp_min(sum(rate(iam_cascade_operations_total{service="tender-acl", event_type="MembershipRevoked"}[5m])), 0.001)
 
   # ── SLO burn-rate alerts (multi-window) ─────────────────────────────────
   - name: tender-acl.slo.burn
@@ -132,7 +132,7 @@ groups:
           description: |
             TAC-4 is missing its 25ms target for {{ $value | humanizePercentage }}
             of requests over the last 5m + 1h windows. TAC-4 is on a live
-            authorization decision path — check tender_acl_check_calls_total
+            authorization decision path — check iam_tender_acl_check_calls_total
             (cache-vs-miss split isn't independently metered; a Valkey
             outage still surfaces here as elevated latency, see readyz)
             and Postgres query latency on tender_acl_entries.

@@ -21,11 +21,11 @@ type UserRemovalCascader interface {
 }
 
 // MemberRemovalMetrics is satisfied by *metrics.Metrics, kept local for
-// the same reason as CascadeMetrics. A distinct metric/interface from
-// CascadeMetrics deliberately — the tenant-offboarding and per-user-
-// removal cascades are different failure domains (different queues,
-// different DLQs) and must stay independently observable, not conflated
-// into one series.
+// the same reason as CascadeMetrics. A distinct interface from CascadeMetrics
+// deliberately — the tenant-offboarding and per-user-removal cascades are
+// different failure domains (different queues, different DLQs) and remain
+// independently observable via the event_type label on the shared
+// iam_cascade_operations_total series.
 type MemberRemovalMetrics interface {
 	RecordMemberRemovalCascade(ctx context.Context, result string)
 	// RecordUnexpectedEventType — see CascadeMetrics' identical method doc

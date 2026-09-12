@@ -89,14 +89,14 @@ spec:
     - name: tender_acl_membershipcheck
       rules:
         - alert: TenderAclMembershipCheckUnavailable
-          # tender_acl_grant_checks_total{status="unavailable"} increments
+          # iam_tender_acl_grant_checks_total{status="unavailable"} increments
           # only when the synchronous membershipcheck call to
           # iam-org-membership fails/times out (TAC-2, fail-closed —
           # TAC-FAIL-1). A sustained non-zero rate means grants are being
           # blocked, not that any authorization is silently wrong (TAC-4 is
           # unaffected — TAC-FAIL-3).
           expr: |
-            sum(rate(tender_acl_grant_checks_total{job={{ include "tender-acl.fullname" . | quote }}, status="unavailable"}[5m])) > 0
+            sum(rate(iam_tender_acl_grant_checks_total{service="tender-acl", status="unavailable"}[5m])) > 0
           for: 15m
           labels:
             severity: warning
@@ -120,7 +120,7 @@ spec:
           # authz risk (TAC-EVT-4) — this is an operational, not security,
           # alert.
           expr: |
-            increase(tender_acl_tenant_offboarding_cascade_total{job={{ include "tender-acl.fullname" . | quote }}, result="error"}[30m]) > 0
+            increase(iam_cascade_operations_total{service="tender-acl", event_type="TenantMembershipsPurged", result="error"}[30m]) > 0
           for: 5m
           labels:
             severity: warning
@@ -163,7 +163,7 @@ spec:
           # risk (a removed user can't present valid gateway-injected
           # headers again regardless).
           expr: |
-            increase(tender_acl_member_removal_cascade_total{job={{ include "tender-acl.fullname" . | quote }}, result="error"}[30m]) > 0
+            increase(iam_cascade_operations_total{service="tender-acl", event_type="MembershipRevoked", result="error"}[30m]) > 0
           for: 5m
           labels:
             severity: warning
@@ -206,7 +206,7 @@ spec:
           # silently skip-and-ack every delivery for a real stretch of
           # time before the event-type rename was caught (CHANGELOG.md).
           expr: |
-            rate(tender_acl_unexpected_event_type_total{job={{ include "tender-acl.fullname" . | quote }}}[10m]) > 0
+            rate(iam_unknown_event_acknowledged_total{service="tender-acl"}[10m]) > 0
           for: 30m
           labels:
             severity: ticket

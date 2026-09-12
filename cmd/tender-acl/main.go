@@ -180,7 +180,7 @@ func run() error {
 	// ObservabilityMiddlewares already ran above, so MetricsRegisterer and
 	// MetricsConstLabels are gincommon's real registry / {service, version}
 	// labels — same order as iam-org-membership / iam-realm-provisioner.
-	svcMetrics, err := metrics.NewMetrics(gincommon.MetricsRegisterer())
+	svcMetrics, err := metrics.NewMetrics(cfg.Environment, gincommon.MetricsRegisterer())
 	if err != nil {
 		return fmt.Errorf("build metrics: %w", err)
 	}

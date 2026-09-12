@@ -66,6 +66,6 @@ Order of operations for production:
    aws sqs get-queue-attributes --queue-url <tenant_lifecycle_tenderacl_queue_url>  # expect Attributes
    ```
 3. Deploy the new image + Helm chart.
-4. Watch `tender_acl_tenant_offboarding_cascade_total{result="error"}` — a
+4. Watch `iam_cascade_operations_total{service="tender-acl", event_type="TenantMembershipsPurged", result="error"}` — a
    rising rate immediately after rollout means the policy did not apply
    (SQS access denied). Roll back if so.

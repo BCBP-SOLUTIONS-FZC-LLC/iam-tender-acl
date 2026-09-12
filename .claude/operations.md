@@ -27,22 +27,26 @@
 **Generic per-request HTTP metrics are `platform-gincommon`'s own** —
 `http_requests_total{method,route,status_class,error_class}`,
 `http_request_duration_seconds{method,route,status_class,error_class}` — passed through as-is via
-`ObservabilityMiddlewares`' `MetricsMiddleware`, **not** duplicated under a `tender_acl_*` name.
-This service was never deployed before this passthrough landed, so it's the only metric naming
-this service has ever shipped with in production (no migration/dual-write concern).
+`ObservabilityMiddlewares`' `MetricsMiddleware`, **not** duplicated here.
 
-**Business-level metrics** keep the `tender_acl_*` prefix (gincommon has no equivalent):
+**Business-level metrics** follow the Enterprise Platform Observability Standard three-tier taxonomy:
 
-| Metric | Labels |
+*Tier 2 — IAM domain (`iam_*`): required const labels `service="tender-acl"`, `environment`*
+
+| Metric | Variable Labels |
 |---|---|
-| `tender_acl_writes_total` | `op` (`grant`/`revoke`), `result` (`success`/`error`) |
-| `tender_acl_grant_checks_total` | `status` (`active`/`not_active`/`unavailable`) |
-| `tender_acl_check_calls_total` | `status` (`has_access`/`no_access`) |
-| `tender_acl_cache_hits_total` / `tender_acl_cache_misses_total` | `key` (fixed `tac:acl`) |
-| `tender_acl_tenant_offboarding_cascade_total` | `result` |
-| `tender_acl_member_removal_cascade_total` | `result` |
-| `tender_acl_unexpected_event_type_total` | `queue`, `event_type` — mirrors `iam-org-membership`'s `iam_unknown_event_acknowledged_total`; makes the "ignoring unexpected event type" WARN observable, not just logged |
-| `tender_acl_processed_events_duplicates_total` | `consumer` — IDEMP-4; `skipDuplicate` increments on a processed_events hit |
+| `iam_cascade_operations_total` | `event_type` (`TenantMembershipsPurged`/`MembershipRevoked`), `result` (`success`/`error`) — unifies both cascade consumers; event_type differentiates them for independent alerting |
+| `iam_unknown_event_acknowledged_total` | `queue`, `event_type` — mirrors `iam-org-membership`'s identical metric; makes the ack-and-drop visible, not just logged |
+
+*Tier 3 — service-specific (`iam_tender_acl_*`): const labels from gincommon `{service, version}`*
+
+| Metric | Variable Labels |
+|---|---|
+| `iam_tender_acl_writes_total` | `op` (`grant`/`revoke`), `result` (`success`/`error`) |
+| `iam_tender_acl_grant_checks_total` | `status` (`active`/`not_active`/`unavailable`) |
+| `iam_tender_acl_check_calls_total` | `status` (`has_access`/`no_access`) |
+| `iam_tender_acl_cache_hits_total` / `iam_tender_acl_cache_misses_total` | `key` (fixed `tac:acl`) |
+| `iam_tender_acl_processed_events_duplicates_total` | `consumer` — IDEMP-4; `skipDuplicate` increments on a processed_events hit (pending promotion to `platform_duplicate_messages_total` pending registry ratification) |
 
 **Both SQS consumers' metrics are `platform-events`'s own** — `events_consumed_total{queue,
 event_type,status}`, `events_consume_duration_seconds{queue,event_type}`,
@@ -97,8 +101,8 @@ populate, cache read) are logged at `WARN`, never escalated to a caller-visible 
 "Tender ACL" Grafana folder: Requests & Writes; Grant-Time Membership Check; Tenant-Offboarding
 Cleanup (LLD §14.4). Alerts (LLD §14.5): `/readyz` failing >5min → SEV-2; TAC-4 error rate >10%/5min
 → SEV-2; membershipcheck unreachable during TAC-2 sustained >15min → SEV-3; DLQ depth > 0 → SEV-3;
-`tender_acl_unexpected_event_type_total` sustained nonzero >30min → ticket (forward-compat signal,
-not paged — `TenderAclUnexpectedEventType`, mirrors `iam-org-membership`'s `IAMUnknownEventType`).
+`iam_unknown_event_acknowledged_total{service="tender-acl"}` sustained nonzero >30min → ticket
+(forward-compat signal, not paged — `TenderAclUnexpectedEventType`, mirrors `iam-org-membership`'s `IAMUnknownEventType`).
 
 ## Configuration (env vars)
 

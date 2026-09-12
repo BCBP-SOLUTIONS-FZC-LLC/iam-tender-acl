@@ -96,7 +96,7 @@ func runTestMain(m *testing.M) int {
 	defer rawRedis.Close()
 	aclCache := valkey.NewCache(rawRedis)
 
-	svcMetrics, err := metrics.NewMetrics()
+	svcMetrics, err := metrics.NewMetrics("test")
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "build metrics:", err)
 		return 1

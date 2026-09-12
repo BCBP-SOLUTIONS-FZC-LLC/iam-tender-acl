@@ -97,7 +97,7 @@ func runTestMain(m *testing.M) int {
 	defer func() { _ = valkeyClient.Close() }()
 	valkeyCache = valkey.NewCache(valkeyClient)
 
-	m2, err := metrics.NewMetrics()
+	m2, err := metrics.NewMetrics("test")
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "build metrics:", err)
 		return 1
