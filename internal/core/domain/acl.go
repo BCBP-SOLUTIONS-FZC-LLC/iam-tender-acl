@@ -3,7 +3,7 @@
 // core/port | core/service, adapter/inbound | adapter/outbound), matching
 // every sibling IAM service (iam-org-membership, iam-catalog-admin,
 // iam-group-mapping). This supersedes the flat, deliberately unlayered
-// layout this service originally shipped with (tender-acl-service-lld.md
+// layout this service originally shipped with (docs/lld/iam-lld-tender-acl-service.md
 // §6, decision TAC-D1) — see ARCHITECTURE.md's "Layer model" section for
 // the history of that divergence and why it was reversed.
 package domain

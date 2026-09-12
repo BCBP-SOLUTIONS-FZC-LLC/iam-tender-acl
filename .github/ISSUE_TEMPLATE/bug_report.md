@@ -25,7 +25,8 @@ A clear description of the bug.
 - [ ] Public HTTP API (endpoint: `METHOD /api/v1/tenants/:id/tenders/:tender_id/acl...` — TAC-1/2/3)
 - [ ] Internal HTTP API (`GET /internal/tenants/:id/tenders/:tender_id/acl/:user_id` — TAC-4)
 - [ ] Membership-check client (`internal/adapter/outbound/membershipcheck` → iam-org-membership's `/internal/tenants/:id/members/:user_id/exists`)
-- [ ] TenantOffboarded consumer (tenant-lifecycle-tenderacl-q)
+- [ ] TenantMembershipsPurged consumer (tenant-lifecycle-tenderacl-q — cascade-delete)
+- [ ] MembershipRevoked consumer (member-removal-tenderacl-q — cascade-soft-delete)
 - [ ] Cache (Valkey — `tac:acl:{tenant}:{tender}:{user}`)
 - [ ] Database / migrations / RLS
 

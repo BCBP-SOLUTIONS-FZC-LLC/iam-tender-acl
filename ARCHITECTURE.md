@@ -6,7 +6,7 @@ One table (`tender_acl_entries`), four endpoints, one synchronous outbound depen
 async subscriptions (tenant-offboarding, and per-user-removal since ADR-0007 Wave 3 Phase 3), zero
 outbound events. This service exists to run standalone just long enough to
 be safely decoupled from `iam-org-membership`'s database — it is explicitly disposable, slated for
-reabsorption into the Tender Service at Wave 4 (`tender-acl-service-lld.md` §22, ADR-0007 Option
+reabsorption into the Tender Service at Wave 4 (`docs/lld/iam-lld-tender-acl-service.md` §25, ADR-0007 Option
 D). Every design choice below optimizes for "correct and cheap to delete later," not "built to
 last."
 
@@ -17,7 +17,7 @@ This service uses the same Clean Architecture / Ports-and-Adapters split its sib
 `internal/core/{domain,port,service}` + `internal/adapter/{inbound,outbound}`.
 
 **History:** it originally shipped with a deliberately flat, near-literal-lift layout
-(`tender-acl-service-lld.md` §6, decision TAC-D1) — the reasoning at the time was that this service
+(`docs/lld/iam-lld-tender-acl-service.md` §6, decision TAC-D1) — the reasoning at the time was that this service
 is explicitly interim (Wave 4 folds it away entirely, ADR-0007 Option D), so minimizing abstraction
 seemed cheaper than building layering that would just be unwound in a future merge. That decision
 was later reversed to bring this service in line with every sibling IAM service's structure and
@@ -53,11 +53,11 @@ graph TD
     end
 
     subgraph consumeradapter["internal/adapter/inbound/consumer/  —  SQS adapter"]
-        consumerimpl["OffboardingConsumer + MemberRemovalConsumer + ProcessedEvents\ntenant-lifecycle-tenderacl-q (tenant cascade) +\nmember-removal-tenderacl-q (per-user cascade, Wave 3 Phase 3)\ncheck-then-mark idempotency, independent consumer names\nCascadeDeleter/UserRemovalCascader/CascadeMetrics/MemberRemovalMetrics\ninterfaces declared LOCALLY, satisfied structurally — NO import\nof postgres or service packages"]
+        consumerimpl["OffboardingConsumer + MemberRemovalConsumer\ntenant-lifecycle-tenderacl-q (tenant cascade) +\nmember-removal-tenderacl-q (per-user cascade, Wave 3 Phase 3)\nskipDuplicate + TxRunner cascade+MarkProcessed (IDEMP-2)\nCascadeDeleter/UserRemovalCascader/CascadeMetrics/MemberRemovalMetrics\ninterfaces declared LOCALLY, satisfied structurally — NO import\nof postgres or service packages"]
     end
 
     subgraph pgadapter["internal/adapter/outbound/postgres/  —  persistence adapter"]
-        repo["repository.go — TenderACLRepository (pgx impl), incl. CascadeDeleteForTenant\ndb.go — DSNFromEnv/ApplyStatementTimeout/MigrationDSNFromEnv\nlogger_adapter.go — port.Logger to pgcommon's domain.Logger\nmigrations/ — schema, RLS, touch_row(), roles"]
+        repo["repository.go — TenderACLRepository (pgx impl), incl. CascadeDeleteForTenant\ndb.go — DSNFromEnv/ApplyStatementTimeout/MigrationDSNFromEnv/LedgerPoolConfig/TxRunner/withPool/wrapConnErr\nprocessed_events.go — idempotency ledger\nlogger_adapter.go — port.Logger to pgcommon's domain.Logger\nmigrations/ — schema, RLS, touch_row(), roles"]
     end
 
     subgraph valkeyadapter["internal/adapter/outbound/valkey/  —  cache adapter"]
@@ -115,7 +115,7 @@ graph LR
     obs(["internal/adapter/outbound/metrics\n(cross-cutting OTel instruments)"])
 
     httpadapter(["internal/adapter/inbound/http\n(handler + router + DTOs)"])
-    consumeradapter(["internal/adapter/inbound/consumer\n(OffboardingConsumer + MemberRemovalConsumer + ProcessedEvents)"])
+    consumeradapter(["internal/adapter/inbound/consumer\n(OffboardingConsumer + MemberRemovalConsumer)"])
     postgres(["internal/adapter/outbound/postgres\n(TenderACLRepository impl)"])
     valkey(["internal/adapter/outbound/valkey\n(Cache impl)"])
     membershipcheck(["internal/adapter/outbound/membershipcheck\n(HTTPChecker impl)"])
@@ -322,7 +322,7 @@ sequenceDiagram
 
 ### Schema dependency on the producer
 
-This service has no Glue Schema Registry integration (LLD §10.4 — explicit, documented exemption
+This service has no Glue Schema Registry integration (LLD §10.5 — explicit, documented exemption
 for `TenantMembershipsPurged`, extended by this task to `MembershipRevoked`). `api/asyncapi.yaml`'s
 `TenantMembershipsPurged` and `MembershipRevoked` messages each carry an
 `x-consumer-schema-dependency` block documenting the exact shape each consumer depends on, since no
@@ -337,6 +337,41 @@ has not been run through `iam-org-membership`'s `platform-schemagov` pipeline, a
 works correctly today — verified end-to-end against real Postgres in both repos' test suites — but
 this specific governance step is genuinely incomplete, flagged explicitly rather than silently
 skipped.
+
+## Data model overview
+
+Database `tender_acl` on RDS PostgreSQL. **One table**, `tender_acl_entries` (`view`/`edit`/`approve`
+via `tender_acl_level`), plus `processed_events` (RLS-exempt, global, 8-day retention, composite PK
+`(event_id, consumer)` so the two cascade consumers dedup independently). Both `ENABLE ROW LEVEL
+SECURITY` + `FORCE ROW LEVEL SECURITY` (two separate `ALTER TABLE` statements — `FORCE` is what
+makes the policy apply even to the table owner) + `REVOKE ALL FROM PUBLIC` + a `tenant_isolation`
+policy on `app.tenant_id` apply only to `tender_acl_entries` — `processed_events` is not
+tenant-scoped data at all. `record_version` is bumped by the shared `touch_row()` `BEFORE UPDATE`
+trigger, guarded by `WHEN (OLD.* IS DISTINCT FROM NEW.*)` so a no-op write never spuriously advances
+the version. `uq_tae_active_entry` (a partial unique index, `WHERE deleted_at IS NULL`) enforces at
+most one active grant per `(tenant, tender, user)` triple — the same index a revoked grantee's
+re-grant relies on being able to insert past. Since this service has never been deployed, the schema
+is one consolidated migration (`0001_tender_acl_schema`) rather than an incremental history with
+dead expand/contract steps to carry forward.
+
+**Two Postgres roles:**
+
+| Role | Grants | Used by |
+|---|---|---|
+| `tender_acl_app` | Normal DML, RLS-scoped, **never** `BYPASSRLS` | The running server pod's app pool |
+| `tender_acl_migrator` | `BYPASSRLS`, DDL | The self-migration step at startup (`RunMigrations`) only — there is no separate reconciler/cross-tenant job in this service to share it with |
+
+Two composite foreign keys were lost in the decomposition, replaced by two different mechanisms
+depending on what each one actually guaranteed — unlike `iam-org-membership`'s own lost cross-database
+FKs, which are uniformly replaced by a read-through-cache existence check: `fk_tae_tenant`'s
+`ON DELETE CASCADE` is replaced by the async tenant-offboarding cascade (§"Event consumer flow"
+above, TAC-D7), since a cascade-delete has no write-time urgency; `fk_tae_tenant_membership` is
+replaced by the synchronous, grant-time-only `membershipcheck` call (TAC-D2), since that one *is* a
+write-time integrity guarantee — a grant must not be written for a non-member at all, not merely
+cleaned up eventually.
+
+Full table catalogue, RLS policy SQL, and every trigger/index/role invariant is in
+[`.claude/database.md`](.claude/database.md).
 
 ## Cache strategy
 
@@ -440,8 +475,9 @@ sequenceDiagram
     exists to survive). Activated by a single `events.InitWithRegisterer("tender-acl",
     buildVersion, gincommon.MetricsRegisterer())` call in `main.go` — the SQS consumer internals
     already compute these on every message regardless; they no-op until this call runs once.
-- **Tracing**: OTel Go SDK, W3C Trace Context. Span shape:
-  `otelgin (inbound.http) → service.ACLService.<method> → outbound.postgres` (+
+- **Tracing**: OTel Go SDK, W3C Trace Context, bootstrapped at process start via
+  `gincommon.InitTracing` (same order as `iam-org-membership` / `iam-realm-provisioner`). Span shape:
+  `inbound.http → service.ACLService.<method> → outbound.postgres` (+
   `outbound.membershipcheck` only on Grant, + `tac:*` cache read/DEL spans on
   CheckAccess/Grant/Revoke).
 - **Logging**: a single Zap-backed logger built via `platform-gincommon/pkg/logger.NewLogger`
@@ -476,7 +512,7 @@ sequenceDiagram
 
 ## Key invariants
 
-**Decision register (TAC-D1–D9, `tender-acl-service-lld.md` §23):**
+**Decision register (TAC-D1–D13, `docs/lld/iam-lld-tender-acl-service.md` §26):**
 
 | # | Decision |
 |---|---|
@@ -485,14 +521,99 @@ sequenceDiagram
 | TAC-D3 | TAC-1/TAC-4 need no membership join, no cross-service call — only TAC-2 does. |
 | TAC-D4 | FK loss is low-risk because the active-grant predicate (TAE-3) was never conditioned on live membership status; AuthZ Enrichment's I-8 gate provides read-time safety independently. |
 | TAC-D5 | No new event introduced for grant/revoke — preserves the source's "no bus event" posture. |
-| TAC-D6 | Wave-4 entry criteria written down now, per ADR-0007 Action Item 7 (LLD §22). |
+| TAC-D6 | Wave-4 entry criteria written down now, per ADR-0007 Action Item 7 (LLD §25). |
 | TAC-D7 | Second FK loss (`fk_tae_tenant ON DELETE CASCADE`) replaced by an async SQS subscription, not a second synchronous check — mirrors Wave-2's GM-D2. |
 | TAC-D8 | No `rls_check_tenant()`/`rls_violation_log` forensic-logging wrapper — deliberate scope reduction, mirrors Wave-2's GM-D8. |
 | TAC-D9 | This v2.0 LLD revision adopts the canonical section template and repoints broken cross-references from earlier drafts; all requirement IDs preserved, only relocated. |
+| TAC-D10 | A second inbound event, `MembershipRevoked` on its own queue (`member-removal-tenderacl-q`), soft-deletes (not hard-deletes) a removed user's rows within the affected tenant — a second, independent asynchronous cascade (ADR-0007 Wave 3 Phase 3), not a discriminated payload on the tenant-offboarding queue, so each cascade's failure mode stays independently observable. |
+| TAC-D11 | The grant-time membership-check response contract is `{"active": true, "tenant_membership_id": "<uuid>"}` / `{"active": false}`, not a bare boolean — required because `tenant_membership_id` is `NOT NULL` and is the one field replacing the lost composite FK. |
+| TAC-D12 | Catch-up, not a new decision: this document's event names were brought in line with `iam-org-membership`'s ADR-0008 rename (`TenantOffboarded`→`TenantMembershipsPurged`, `TenantMembershipRemoved`→`MembershipRevoked`) after the service's own code and `api/asyncapi.yaml` had already shipped against the new names. |
+| TAC-D13 | TAC-1 (list) is paginated (`?limit=`/`?offset=`, default 100, hard ceiling 500) — added after a production-readiness audit found an unbounded response was a real gap, not merely theoretical; the underlying query's index usage is unaffected. |
 
-**Event invariants (TAC-EVT-1–6)** are described in full in `tender-acl-service-lld.md` §10.5;
+**Event invariants (TAC-EVT-1–6)** are described in full in `docs/lld/iam-lld-tender-acl-service.md` §10.6;
 **operational/failure invariants (TAC-FAIL-1–3)** are covered in the Concurrency/Failure section
 above.
+
+## Deployment
+
+### Container image — one binary
+
+Unlike `iam-org-membership` (separate server + reconciler binaries), this service ships **one**
+binary, `/tender-acl` (`cmd/tender-acl`), running both the HTTP server (TAC-1..4) and both SQS
+consumers (tenant-offboarding + per-user-removal) in-process via a single `errgroup` — there is no
+reconciler binary and no K8s CronJob in this chart at all (§"What this service deliberately does not
+have").
+
+Two-stage `Dockerfile`: `golang:1.26.6-bookworm` builder (digest-pinned), runtime is
+`gcr.io/distroless/static-debian12:nonroot` (no shell, non-root UID 65532) — only the one compiled
+binary is copied in, which is why `docs/swagger` (blank-imported for its `init()`-time Swagger
+registration) and `api/asyncapi.yaml` (compiled in via `//go:embed`) both have to survive into the
+build context rather than being read from disk at runtime. `.dockerignore` excludes `docs/lld/` and
+`docs/architecture/` specifically — **not** `docs/` wholesale, which previously broke every build by
+also stripping `docs/swagger` (fixed during a production-readiness audit; see `CHANGELOG.md`).
+
+`hadolint`-clean (`# hadolint ignore=DL3008` suppresses the one expected finding — `apt-get
+install` intentionally tracks Bookworm's rolling security updates rather than pinning a package
+version, since the base image itself is already digest-pinned). The builder stage's final `COPY
+--link . .` decouples that layer from earlier ones for better cache reuse, matching
+`iam-org-membership`'s identical builder-stage copy. The runtime stage re-declares `ARG
+BUILD_VERSION` (ARGs don't cross a `FROM` boundary) and sets it as both `ENV BUILD_VERSION` and the
+`org.opencontainers.image.revision` OCI label — `cmd/tender-acl/main.go`'s `getEnv("BUILD_VERSION",
+buildVersion)` can read it at runtime now, not just via the `-ldflags -X main.buildVersion=...`
+compile-time embed.
+
+### Helm chart
+
+`deploy/helm/tender-acl/` renders one `Deployment`, no `CronJob`s. HPA: `minReplicas: 2` /
+`maxReplicas: 10`, CPU 70% / memory 80% (optionally request-rate-based instead, via
+`autoscaling.targetRPSPerReplica` + `deploy/monitoring/prometheus-adapter-rule.yaml`). PDB
+`minAvailable: 1`. `terminationGracePeriodSeconds: 30` — matches `main.go`'s shutdown ordering: HTTP
+`Shutdown` → metrics-server `Shutdown` → both SQS consumers' `Stop()` → `pgPool.DrainAndClose`
+(`Close()` deferred as a safety net). NetworkPolicy is scoped to the `envoy-gateway-system` ingress
+namespace plus a `monitoring`-namespace `prometheus` scrape on the metrics port — the same shape
+`iam-group-mapping`'s own chart uses, plus one egress rule that sibling doesn't need: outbound to
+`iam-org-membership` itself for the `membershipcheck` call, this service's one synchronous outbound
+dependency.
+
+### Migration safety
+
+Since this service has never been deployed, the schema is one consolidated `0001_tender_acl_schema`
+migration rather than an incremental history with dead expand/contract steps to carry forward. The
+pod self-migrates at startup (`RunMigrations`, using `MIGRATION_DATABASE_URL`'s `BYPASSRLS`
+`tender_acl_migrator` role) — there is no separate migrate Job in this chart. `PG_BOUNCER_MODE` is
+forced `true` unconditionally in code (not env-driven), since transaction-scoped GUC binding is
+required for RLS correctness regardless of deployment topology, not a tunable to get wrong via
+config.
+
+## Testing strategy
+
+- **Unit** (colocated `*_test.go` throughout `internal/`, no Docker) — fake/mock implementations of
+  every port (`fakeRepo`, `fakeChecker`, `fakeCache`) drive `ACLService`/`Handler` business logic and
+  every `domain.Error` code's HTTP-status mapping without a database; `cmd/tender-acl/config_test.go`
+  covers `loadConfig`'s fail-fast behavior (missing/malformed required env vars) and `getEnvInt`.
+- **RLS** (`test/rls/`, `-tags=rls`, testcontainers-go, real Postgres, full migration suite) — the
+  canonical suite: missing-GUC fail-closed (zero rows, never an error), cross-tenant read/write/update
+  denial, and the pooled-connection no-leak case (`TestRLS_NoGUCLeakageAcrossPooledConnection`,
+  proving the `NULLIF(...,'')` hardening in the migration is load-bearing, not decorative).
+- **Integration** (`test/integration/`, `-tags=integration`, testcontainers — real Postgres + Valkey +
+  an SQS-compatible container) — both cascade consumers' idempotency (duplicate delivery is a no-op)
+  and unknown-event-type handling against a real database; the membership-check fail-closed path;
+  the optimistic-lock conflict on revoke; cache hit/miss round trips against real Valkey.
+- **E2E** (`test/e2e/`, `-tags=e2e`) — full HTTP-stack request flows (grant → check → revoke → check)
+  against the real `NewRouter`, the same function `cmd/tender-acl/main.go` calls, so the e2e suite
+  and production share one route table by construction.
+- **Smoke** (CI only) — two layers: `.github/scripts/smoke-tests.sh` (image-size gate plus a
+  startup-gate check that the CI-built image exits non-zero on missing required env vars) and
+  `.github/scripts/smoke-http-test.sh` (added during a production-readiness audit — boots the actual
+  built image against real Postgres/Valkey/LocalStack via `docker-compose.yml` and issues real
+  `/readyz`/`/healthz`/TAC-4 requests; the first smoke test alone never proved the shipped image
+  actually boots and serves traffic).
+
+Coverage is measured over unit+integration+rls merged via `make test-ci`/`make cover-func`.
+`.github/scripts/coverage-gate.sh` enforces `COVERAGE_THRESHOLD` (default **85%**, raised from an
+initial 70% baseline once real merged coverage was independently measured at 91.6% — this service
+sits on a live authorization-decision path, TAC-4, so the floor was raised to match rather than left
+at a starting-baseline number).
 
 ## Threat model (brief)
 
@@ -518,12 +639,29 @@ above.
 | A shared audit-log table | No such mechanism exists anywhere in this platform yet — structured logging is the only durable write record today. |
 | A GDPR per-user delete path | A departed user's row goes inert (unreachable via TAC-4 once membership lapses, TAC-D4), not deleted, unless the whole tenant offboards. |
 | `rls_check_tenant()`/`rls_violation_log` forensic logging | TAC-D8 — deliberately dropped, mirrors GM-D8. RLS enforcement itself is unaffected. |
+| A "Consumer conformance checklist" section (`iam-org-membership`'s ARCHITECTURE.md has one) | That section is guidance for services subscribing to *this* service's published events — this service publishes zero (TAC-EVT-1), so there is no downstream consumer contract to write one for. |
+| A "Schema lifecycle" section (`iam-org-membership`'s ARCHITECTURE.md has one, covering its Glue Schema Registry integration) | Glue governance only applies to schemas a service *produces*; this service is consume-only, and its consumer-side schema dependency is covered instead by "Schema dependency on the producer" above. |
 
 ## Developer tools
 
 `go-arch-lint` (`.go-arch-lint.yml`) enforces the one dependency rule described above.
 `golangci-lint` (`.golangci.yml`, invoked via `make lint`) covers everything else. `go vet`/`gofmt`
 run in CI (`validate-quality.yml`) alongside both.
+
+## Session-specific decisions
+
+Unlike `iam-org-membership`'s own ARCHITECTURE.md, this section is intentionally short: every
+judgment call made during this service's build-out is already recorded at its natural point of
+impact — the LLD's Decision Register (TAC-D1–D13, `docs/lld/iam-lld-tender-acl-service.md` §26,
+cross-referenced from "Key invariants" above) for design decisions, and its Revision History (same
+document, top of file) plus `CHANGELOG.md` for the fix-level detail (what was found, why, what
+changed) a production-readiness audit or a shared-library-alignment pass produced. Duplicating that
+material here would just be a second copy to keep in sync; this document instead points at it.
+
+**This document's own "Key invariants" table above is kept in sync with the LLD's register** (both
+currently run to TAC-D13) — if the two ever appear to disagree, treat the LLD's register as
+authoritative, since this document is a navigational summary of it, not an independent source of
+truth.
 
 ## Documentation assets
 

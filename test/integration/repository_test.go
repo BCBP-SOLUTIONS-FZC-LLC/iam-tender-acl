@@ -169,7 +169,7 @@ func TestRepository_List_IncludesExpiredButNotRevoked(t *testing.T) {
 	require.NoError(t, err)
 	require.NoError(t, repo.Revoke(ctx, tenantID, tenderID, revokedUser, revokedCreated.RecordVersion))
 
-	entries, err := repo.List(ctx, tenantID, tenderID)
+	entries, err := repo.List(ctx, tenantID, tenderID, 100, 0)
 	require.NoError(t, err)
 	assert.Len(t, entries, 1, "list must include the passively-expired entry (TAE-7) but not the revoked one (TAE-4)")
 }
@@ -194,7 +194,7 @@ func TestRepository_CascadeDeleteForTenant_RemovesOnlyThatTenant(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, int64(1), deleted)
 
-	remaining, err := repo.List(ctx, tenantB, uuid.Nil)
+	remaining, err := repo.List(ctx, tenantB, uuid.Nil, 100, 0)
 	require.NoError(t, err)
 	_ = remaining // tenant B's row exists under a different tender_id; existence is what matters
 
@@ -335,7 +335,7 @@ func TestRepository_List_QueryError(t *testing.T) {
 		_, _ = adminPool.Exec(context.Background(), `ALTER TABLE IF EXISTS tender_acl_entries_bak RENAME TO tender_acl_entries`)
 	})
 
-	_, err := repo.List(context.Background(), uuid.New(), uuid.New())
+	_, err := repo.List(context.Background(), uuid.New(), uuid.New(), 100, 0)
 	assert.Error(t, err)
 }
 

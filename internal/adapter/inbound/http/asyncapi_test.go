@@ -629,7 +629,7 @@ func TestResolveSchema_AllOf_DuplicatePropertyOrder_Deduped(t *testing.T) {
 func TestHandler_List_WithEntries_ResponseContainsEntries(t *testing.T) {
 	entryID := uuid.New()
 	repo := emptyRepo()
-	repo.listFn = func(context.Context, uuid.UUID, uuid.UUID) ([]domain.TenderACLEntry, error) {
+	repo.listFn = func(context.Context, uuid.UUID, uuid.UUID, int, int) ([]domain.TenderACLEntry, error) {
 		return []domain.TenderACLEntry{{ID: entryID, AccessLevel: domain.ACLView}}, nil
 	}
 	h := newTestHandler(repo, &fakeChecker{}, &fakeCache{}, t)

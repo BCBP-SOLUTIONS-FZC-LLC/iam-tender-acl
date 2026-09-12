@@ -55,9 +55,14 @@ type ACLResponse struct {
 	UpdatedAt     time.Time  `json:"updated_at"`
 }
 
-// ListResponse is TAC-1's response body.
+// ListResponse is TAC-1's response body. Limit/Offset echo back the
+// pagination window actually applied (after clamping), so a caller can tell
+// whether it received a full page (len(Entries) == Limit, more may exist)
+// or the tail of the result set (len(Entries) < Limit).
 type ListResponse struct {
 	Entries []ACLResponse `json:"entries"`
+	Limit   int           `json:"limit"`
+	Offset  int           `json:"offset"`
 }
 
 // CheckAccessResponse is TAC-4/I-12's response body — has_access/

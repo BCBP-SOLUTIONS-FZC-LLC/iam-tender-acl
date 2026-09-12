@@ -21,11 +21,11 @@ permissions:
 
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: 'true'
-  # 70% is a starting baseline (see .github/scripts/coverage-gate.sh) — not
-  # the aspiration a more mature sibling service holds itself to, and this
-  # service is explicitly interim (ADR-0007 Wave 3 / TAC-D1). Ratchet this
-  # up over time; never lower it to make a failing PR pass.
-  COVERAGE_THRESHOLD: '70'
+  # Raised from 70% to 85% (see .github/scripts/coverage-gate.sh) after a
+  # production-readiness audit found real merged coverage already at 91.6%
+  # and this service on a live authorization-decision path (TAC-4). Ratchet
+  # this up over time; never lower it to make a failing PR pass.
+  COVERAGE_THRESHOLD: '85'
 
 jobs:
   test:

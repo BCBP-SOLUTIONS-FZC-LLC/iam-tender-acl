@@ -42,6 +42,7 @@ this service has ever shipped with in production (no migration/dual-write concer
 | `tender_acl_tenant_offboarding_cascade_total` | `result` |
 | `tender_acl_member_removal_cascade_total` | `result` |
 | `tender_acl_unexpected_event_type_total` | `queue`, `event_type` — mirrors `iam-org-membership`'s `iam_unknown_event_acknowledged_total`; makes the "ignoring unexpected event type" WARN observable, not just logged |
+| `tender_acl_processed_events_duplicates_total` | `consumer` — IDEMP-4; `skipDuplicate` increments on a processed_events hit |
 
 **Both SQS consumers' metrics are `platform-events`'s own** — `events_consumed_total{queue,
 event_type,status}`, `events_consume_duration_seconds{queue,event_type}`,
@@ -49,14 +50,25 @@ event_type,status}`, `events_consume_duration_seconds{queue,event_type}`,
 `sqs_visibility_extension_errors_total{queue}` (the latter two are flagged by the library's own
 docs as *causing* duplicate delivery when non-zero — exactly the failure mode `processed_events`
 exists to survive). Activated by one `events.InitWithRegisterer("tender-acl", buildVersion,
-gincommon.MetricsRegisterer())` call in `main.go`.
+gincommon.MetricsRegisterer())` call in `main.go`, after `ObservabilityMiddlewares` has primed
+gincommon's metrics-init API so business collectors carry the same `{service, version}` const
+labels as `http_*`.
+
+**Postgres pool/query metrics are `platform-pgcommon`'s own** — `pgcommon_*` instruments
+activated by `pgmetrics.InitWithRegisterer` on the same registerer, matching
+`iam-org-membership` / `iam-realm-provisioner`.
 
 ### Tracing
 
-OTel Go SDK, W3C Trace Context. Span shape: `otelgin (inbound.http) → service.ACLService.<method>
-→ outbound.postgres` (+ `outbound.membershipcheck` only on Grant, + `tac:*` cache read/DEL spans on
-CheckAccess/Grant/Revoke). Consumers get their own top-level spans
-(`OffboardingConsumer.Handle`/`MemberRemovalConsumer.Handle`).
+OTel Go SDK, W3C Trace Context, bootstrapped at process start via `gincommon.InitTracing`
+(same order as `iam-org-membership` / `iam-realm-provisioner`) so in-process spans get valid
+trace IDs even before the HTTP engine is built. `ObservabilityMiddlewares`'
+`TracingMiddleware` then attaches the inbound HTTP span; `EnsureInitTelemetry` is a no-op
+once the SDK provider is already installed. Span shape: `inbound.http → service.ACLService.<method>
+→ outbound.postgres` (`postgres.NewOTelTracer` on the app pool) + `outbound.membershipcheck`
+only on Grant + `tac:*` cache read/DEL spans on CheckAccess/Grant/Revoke. Consumers get
+their own top-level spans (`OffboardingConsumer.Handle`/`MemberRemovalConsumer.Handle`).
+`gincommon.Shutdown(log)` flushes the TracerProvider and Zap on SIGTERM.
 
 ### Logging
 
@@ -100,33 +112,55 @@ Three have **no safe default** and must be set or the process fails fast at star
 | `DATABASE_URL` | `tender_acl_app` (RLS-bound) connection string | *(required)* |
 | `MIGRATION_DATABASE_URL` | `tender_acl_migrator` (BYPASSRLS) startup-migration connection string | falls back to `DATABASE_URL` |
 | `DATABASE_MIGRATION_URL` | separate var read by the standalone `migrate-up`/`down`/`create` Make targets | same default value as above, distinct var |
-| `PG_MAX_CONNS` / `PG_MIN_CONNS` / `PG_SLOW_QUERY_THRESHOLD` | pool sizing (`pgcommon.ConfigFromEnv`) | `10` / `2` / `200ms` |
-| `PG_STATEMENT_TIMEOUT` | server-side `statement_timeout` appended to the DSN (`postgres.ApplyStatementTimeout`) so a hung query releases its pool connection instead of holding it for the full request lifetime — a Go duration (e.g. `5s`); only applied when the DSN is assembled from `PG_*` vars, not when `DATABASE_URL` is set directly | unset (no timeout) |
+| `PG_MAX_CONNS` / `PG_MIN_CONNS` / `PG_SLOW_QUERY_THRESHOLD` | pool sizing (`pgcommon.ConfigFromEnv`) — applied to the one RLS-bound app pool (`processed_events` shares it). `PG_MIN_CONNS` is forced `0` in code when `PGBouncerMode` is forced true (idle backends under txn pooling pin session state) | `10` / `0` / `200ms` |
+| `PG_STATEMENT_TIMEOUT` | server-side `statement_timeout` appended to the DSN (`postgres.ApplyStatementTimeout`) so a hung query releases its pool connection instead of holding it for the full request lifetime — a Go duration (e.g. `5s`); applied when the DSN is assembled from `PG_*` vars, and also to `MIGRATION_DATABASE_URL` (idempotent if the DSN already carries `statement_timeout`). Not appended when `DATABASE_URL` is set directly for the app DSN | `5s` |
 | `VALKEY_ADDR` / `VALKEY_PASSWORD` | TAC-4's 30s cache | `localhost:6379` / — |
 | `CORE_INTERNAL_BASE_URL` | `iam-org-membership`'s internal base URL, consulted only at TAC-2 grant time | `http://org-membership.iam.svc.cluster.local` |
 | `MEMBERSHIP_CHECK_TIMEOUT_MS` | client-side timeout for the membership-existence call | `300` |
 | `SQS_QUEUE_URL` / `SQS_DLQ_URL` | `tenant-lifecycle-tenderacl-q` (+ DLQ) — loaded via `platform-events/pkg/config.LoadSQS`, not this service's own `config.go` | *(required)* |
 | `SQS_CONCURRENCY` | queue #1's concurrency — `platform-events/pkg/config`'s own var | `1` (library default; set to `4` explicitly to preserve prior effective concurrency) |
 | `MEMBER_REMOVAL_SQS_QUEUE_URL` / `..._DLQ_URL` | `member-removal-tenderacl-q` (+ DLQ), ADR-0007 Wave 3 Phase 3 | *(required)* |
-| `CONSUMER_CONCURRENCY` | queue #2's concurrency only — hand-rolled, not `platform-events/pkg/config` | `4` |
+| `MEMBER_REMOVAL_SQS_CONCURRENCY` | queue #2's concurrency — cloned `LoadSQS` env passed through `SQSConsumerOptions`; falls back to `CONSUMER_CONCURRENCY` | `4` |
+| `CONSUMER_CONCURRENCY` | fallback for queue #2 if `MEMBER_REMOVAL_SQS_CONCURRENCY` is unset | `4` |
 | `AWS_REGION` / `AWS_ENDPOINT_URL` / `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` | LocalStack in dev; production uses IRSA and drops static creds | `us-east-1` / LocalStack URL / dummy |
-| `OTEL_EXPORTER_OTLP_ENDPOINT` | gRPC OTLP endpoint (bare `host:port`, no scheme) — via `platform-gincommon`'s `ObservabilityMiddlewares` | `localhost:4317` |
+| `OTEL_EXPORTER_OTLP_ENDPOINT` | gRPC OTLP endpoint (bare `host:port`, no scheme) — via `platform-gincommon`'s `InitTracing` | `localhost:4317` |
 | `ENVIRONMENT` | selects `platform-gincommon`'s Zap dev-console vs. prod-JSON encoder (`logger.NewLogger`, "dev"/"development"/"local" vs. everything else) and env/trace badges elsewhere | `development` |
+| `APP_ENV` | gincommon's OTLP insecure / sample-ratio defaults (`InitTracing`: 1.0 + plaintext in dev, 0.1 + TLS otherwise) | unset (production-safe) |
+| `APP_NAME` | unused by this binary's gincommon.Config (ServiceName is hardcoded `tender-acl`); kept for Makefile/Helm parity with siblings | `tender-acl` |
 | `PROCESSED_EVENTS_CLEANUP_INTERVAL` | cleanup ticker cadence for the 8-day retention sweep | — |
-| `DOCS_ENABLED` | opt `/swagger` and `/asyncapi`/`/asyncapi.yaml` into production | `false` |
+| `DOCS_ENABLED` | opt `/swagger` and `/asyncapi`/`/asyncapi.yaml` into production — parsed case-insensitively (`strings.EqualFold`, so `TRUE`/`True` also enable it) | `false` |
 | `DOCS_AUTH_TOKEN` | if set, requires `Authorization: Bearer <token>` on those routes in production | — |
+
+Any int-typed env var (`getEnvInt` — `MEMBERSHIP_CHECK_TIMEOUT_MS`, `CONSUMER_CONCURRENCY`, etc.)
+**fails startup** if set to a non-integer value, rather than silently falling back to its default —
+a typo'd operator-set value is caught immediately instead of only showing up later as a
+wrong effective timeout/concurrency nobody noticed.
 
 ## CI/CD
 
 `.github/workflows/ci.yml` fans out three parallel jobs on push/PR (paths-ignore skips pure-doc
 commits):
 
-- **`validate-test.yml`** — race + coverage gate; gates `trivy`/`smoke`.
+- **`validate-test.yml`** — race + coverage gate (`COVERAGE_THRESHOLD` **85%**, raised from an
+  initial 70% baseline once real merged unit+integration+rls coverage was independently measured at
+  ~91.6% — this service sits on a live authorization-decision path, TAC-4); gates `trivy`/`smoke`.
 - **`validate-quality.yml`** — `tidy`/`fmt-check`/`vet`/`lint`; gates `push`/`release` only.
 - **`build-image`** — Hadolint + `.dockerignore` check *before* the (expensive) multi-stage
   distroless Docker build, then Trivy scan + Cosign signing on merge to `main`.
+- **`smoke`** (in `ci.yml`) — two layers: the original `smoke-tests.sh` (image-size gate + a
+  startup-gate check that the built image exits non-zero on missing required env vars), plus
+  `smoke-http-test.sh` — boots the actual built image against real Postgres/Valkey/LocalStack
+  (`docker-compose.yml`) and issues real `/readyz`/`/healthz`/TAC-4 requests. The first layer alone
+  never proved the shipped image actually boots and serves traffic; this closes that gap.
 
-Other workflows: `changelog-check.yml` (CHANGELOG discipline gate), `release.yml`.
+`release.yml`'s deploy-gate health check now fails loudly instead of silently passing when
+`vars.PROMETHEUS_URL` is unset (bypass only via explicit `vars.ALLOW_DEPLOY_WITHOUT_HEALTH_GATE=true`)
+or when Prometheus reports zero scrape targets for `up{job=~".*tender-acl.*"}` — previously either
+case silently read as "healthy."
+
+Other workflows: `changelog-check.yml` (CHANGELOG discipline gate), `release.yml`. See
+`VERSIONING.md` for the full release process and the one remaining known gap:
+`deploy/helm/tender-acl/Chart.yaml`'s `version`/`appVersion` mismatch.
 
 `make ci` = `tidy fmt-check vet lint test-ci build` — the local equivalent of the quality+test gates.
 
@@ -136,3 +170,12 @@ Other workflows: `changelog-check.yml` (CHANGELOG discipline gate), `release.yml
 both SQS consumers in a **single process** (`errgroup`) — no second binary, no sidecar. The final
 stage copies only the compiled binary, never the source tree — this is exactly why `api/asyncapi.yaml`
 had to move to `//go:embed` (`api/embed.go`) rather than being read from disk at request time.
+`docs/swagger` (also blank-imported for its `init()`-time Swagger registration) needs the same
+build-context survival — `.dockerignore` excludes only `docs/lld/`/`docs/architecture/`, **not**
+`docs/` wholesale (a prior version did, which broke every `docker build` at the `go build` step).
+`COPY . .` uses `--link` for better layer-cache reuse. The `apt-get install` line in the builder
+stage carries a `# hadolint ignore=DL3008` (package versions intentionally track the digest-pinned
+base image's own security updates rather than being pinned separately). The runtime stage
+re-declares `ARG BUILD_VERSION=dev` and sets it as both `ENV BUILD_VERSION` (read by `main.go`'s
+`getEnv("BUILD_VERSION", buildVersion)` as a fallback) and the `org.opencontainers.image.revision`
+OCI label.

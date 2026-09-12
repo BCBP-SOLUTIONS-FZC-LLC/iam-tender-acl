@@ -25,7 +25,7 @@ func (f *fakeUserRemovalCascader) SoftDeleteForUser(ctx context.Context, tenantI
 }
 
 func newTestMemberRemovalConsumer(repo UserRemovalCascader, idem IdempotencyStore, metrics MemberRemovalMetrics) *MemberRemovalConsumer {
-	return NewMemberRemovalConsumer(repo, idem, metrics, port.SlogStyleLogger{}, otel.Tracer("test"))
+	return NewMemberRemovalConsumer(repo, idem, fakeTxRunner{}, metrics, port.SlogStyleLogger{}, otel.Tracer("test"))
 }
 
 // memberRemovedEnvelope mirrors iam-org-membership's actual emission
@@ -82,10 +82,12 @@ func TestMemberRemovalConsumer_Handle_DuplicateEvent_SkipsCascade(t *testing.T) 
 			return nil
 		},
 	}
-	c := newTestMemberRemovalConsumer(repo, idem, &fakeCascadeMetrics{})
+	metrics := &fakeCascadeMetrics{}
+	c := newTestMemberRemovalConsumer(repo, idem, metrics)
 
 	err := c.Handle(context.Background(), memberRemovedEnvelope(eventID, tenantID, userID))
 	require.NoError(t, err)
+	assert.Equal(t, []string{"duplicate:member_removal"}, metrics.results)
 }
 
 func TestMemberRemovalConsumer_Handle_WrongEventType_SkippedNoError(t *testing.T) {
@@ -93,8 +95,15 @@ func TestMemberRemovalConsumer_Handle_WrongEventType_SkippedNoError(t *testing.T
 		t.Fatal("cascade must not run for an unexpected event type")
 		return 0, nil
 	}}
+	var markCalled bool
+	idem := &fakeIdempotencyStore{
+		markProcessedFn: func(context.Context, uuid.UUID) error {
+			markCalled = true
+			return nil
+		},
+	}
 	metrics := &fakeCascadeMetrics{}
-	c := newTestMemberRemovalConsumer(repo, &fakeIdempotencyStore{}, metrics)
+	c := newTestMemberRemovalConsumer(repo, idem, metrics)
 
 	env := events.Envelope[json.RawMessage]{
 		ID: uuid.New().String(), Type: "TenantOffboarded",
@@ -102,8 +111,26 @@ func TestMemberRemovalConsumer_Handle_WrongEventType_SkippedNoError(t *testing.T
 	}
 	handleErr := c.Handle(context.Background(), env)
 	require.NoError(t, handleErr)
+	assert.True(t, markCalled, "unknown event types must MarkProcessed so redelivery does not storm")
 	assert.Equal(t, []string{"member-removal-tenderacl-q:TenantOffboarded"}, metrics.results,
 		"an unexpected event type must be observable as a metric, not just a log line")
+}
+
+// TestMemberRemovalConsumer_Handle_UnknownEventType_AckFails_ReturnsError
+// mirrors OffboardingConsumer's equivalent: ackUnknown's own MarkProcessed
+// failing must propagate, not be silently swallowed.
+func TestMemberRemovalConsumer_Handle_UnknownEventType_AckFails_ReturnsError(t *testing.T) {
+	idem := &fakeIdempotencyStore{
+		markProcessedFn: func(context.Context, uuid.UUID) error { return errors.New("ledger insert failed") },
+	}
+	c := newTestMemberRemovalConsumer(&fakeUserRemovalCascader{}, idem, &fakeCascadeMetrics{})
+
+	env := events.Envelope[json.RawMessage]{
+		ID: uuid.New().String(), Type: "TenantOffboarded",
+		TenantID: uuid.New().String(), Subject: uuid.New().String(), Timestamp: time.Now().UTC(),
+	}
+	err := c.Handle(context.Background(), env)
+	assert.Error(t, err)
 }
 
 func TestMemberRemovalConsumer_Handle_MissingEventID_ReturnsError(t *testing.T) {

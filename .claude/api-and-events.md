@@ -10,7 +10,7 @@ depth alongside RLS). TAC-4 has **no** role/JWT check at all — mesh-only.
 
 | ID | Method & path | Auth | Notes |
 |---|---|---|---|
-| TAC-1 | `GET /api/v1/tenants/:id/tenders/:tender_id/acl` | role-gated | List active + inactive entries. Not cached — low-frequency, admin-gated read. |
+| TAC-1 | `GET /api/v1/tenants/:id/tenders/:tender_id/acl` | role-gated | List active + inactive entries, paginated (`?limit=`, default 100, hard ceiling 500 — clamped, not rejected, if exceeded; `?offset=`, default 0). Non-positive `limit` or negative `offset` → `400 invalid_request`. Response echoes the applied `limit`/`offset`. Not cached — low-frequency, admin-gated read. |
 | TAC-2 | `POST /api/v1/tenants/:id/tenders/:tender_id/acl` | role-gated | Grant. Blocks on `port.MembershipCheckClient.Exists` — fails **closed** (`503 core_unavailable`) if that check can't be performed, never fails open. |
 | TAC-3 | `DELETE /api/v1/tenants/:id/tenders/:tender_id/acl/:user_id` | role-gated | Revoke (soft-delete). Body must include `{"record_version": <int64>}`; mismatch → `409 optimistic_lock_conflict`. Returns `204`. |
 | TAC-4 | `GET /internal/tenants/:id/tenders/:tender_id/acl/:user_id` | mesh-only, no `/api/v1` prefix | **Never** `404` — no active grant is a valid, cacheable `has_access:false` answer. Cached 30s in Valkey. |
@@ -58,10 +58,10 @@ design choice for this service's lifetime, not a gap.
 
 Queue #1 is built via `platform-events/pkg/config.SQSConfigFromEnv(sqsEnv, ...)` +
 `SQSConsumerOptions(sqsEnv)...`, where `sqsEnv := eventsconfig.LoadSQS()` (validated, warnings
-logged via `LogWarningsTo`) — this is the library-owned config path. Queue #2 stays hand-rolled:
-literal `events.SQSConfig{QueueURL, Region, Logger}` + `events.WithConcurrency(getEnvInt(
-"CONSUMER_CONCURRENCY", 4))`, because `platform-events/pkg/config` only covers one queue per
-service.
+logged via `LogWarningsTo`) — this is the library-owned config path. Queue #2 clones that env,
+overrides `QueueURL` + concurrency (`MEMBER_REMOVAL_SQS_CONCURRENCY`, falling back to
+`CONSUMER_CONCURRENCY`), and uses the same `SQSConfigFromEnv` / `SQSConsumerOptions` mappers.
+`outbox.ApplySchema` / `outbox.NewRunner` / `events.NewSNSPublisher` are never called (TAC-EVT-1).
 
 Consumer metrics (`events_consumed_total{queue,event_type,status}`,
 `sqs_receive_errors_total{queue}`, `sqs_delete_errors_total{queue}`,

@@ -13,6 +13,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"go.opentelemetry.io/otel"
@@ -74,7 +75,7 @@ func plainMemberCtx(tenantID uuid.UUID) *RequestContext {
 // test files use). ────────────────────────────────────────────────────────
 
 type fakeRepo struct {
-	listFn                   func(ctx context.Context, tenantID, tenderID uuid.UUID) ([]domain.TenderACLEntry, error)
+	listFn                   func(ctx context.Context, tenantID, tenderID uuid.UUID, limit, offset int) ([]domain.TenderACLEntry, error)
 	grantFn                  func(ctx context.Context, entry domain.TenderACLEntry) (domain.TenderACLEntry, error)
 	revokeFn                 func(ctx context.Context, tenantID, tenderID, userID uuid.UUID, expectedVersion int64) error
 	findActiveFn             func(ctx context.Context, tenantID, tenderID, userID uuid.UUID) (*domain.TenderACLEntry, error)
@@ -82,8 +83,8 @@ type fakeRepo struct {
 	softDeleteForUserFn      func(ctx context.Context, tenantID, userID uuid.UUID) (int64, error)
 }
 
-func (f *fakeRepo) List(ctx context.Context, tenantID, tenderID uuid.UUID) ([]domain.TenderACLEntry, error) {
-	return f.listFn(ctx, tenantID, tenderID)
+func (f *fakeRepo) List(ctx context.Context, tenantID, tenderID uuid.UUID, limit, offset int) ([]domain.TenderACLEntry, error) {
+	return f.listFn(ctx, tenantID, tenderID, limit, offset)
 }
 func (f *fakeRepo) Grant(ctx context.Context, entry domain.TenderACLEntry) (domain.TenderACLEntry, error) {
 	return f.grantFn(ctx, entry)
@@ -166,7 +167,7 @@ func newTestHandler(repo port.TenderACLRepository, checker port.MembershipCheckC
 
 func emptyRepo() *fakeRepo {
 	return &fakeRepo{
-		listFn: func(context.Context, uuid.UUID, uuid.UUID) ([]domain.TenderACLEntry, error) {
+		listFn: func(context.Context, uuid.UUID, uuid.UUID, int, int) ([]domain.TenderACLEntry, error) {
 			return []domain.TenderACLEntry{}, nil
 		},
 		grantFn: func(_ context.Context, e domain.TenderACLEntry) (domain.TenderACLEntry, error) {
@@ -225,6 +226,85 @@ func TestHandler_List_InvalidTenantID_Returns400(t *testing.T) {
 	assertErrorCode(t, w, http.StatusBadRequest, domain.ErrCodeInvalidRequest)
 }
 
+func TestHandler_List_NoQueryParams_DefaultsLimit100Offset0(t *testing.T) {
+	tenant := uuid.New()
+	var gotLimit, gotOffset int
+	repo := &fakeRepo{listFn: func(_ context.Context, _, _ uuid.UUID, limit, offset int) ([]domain.TenderACLEntry, error) {
+		gotLimit, gotOffset = limit, offset
+		return []domain.TenderACLEntry{}, nil
+	}}
+	h := newTestHandler(repo, &fakeChecker{}, &fakeCache{}, t)
+	c, w := buildCtx(http.MethodGet, "/", ``, tenderAdminCtx(tenant))
+	setParams(c, "id", tenant.String(), "tender_id", uuid.New().String())
+	h.List(c)
+	require.Equal(t, http.StatusOK, w.Code)
+	assert.Equal(t, defaultListLimit, gotLimit)
+	assert.Equal(t, 0, gotOffset)
+
+	var body ListResponse
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &body))
+	assert.Equal(t, defaultListLimit, body.Limit)
+	assert.Equal(t, 0, body.Offset)
+}
+
+func TestHandler_List_CustomLimitOffset_PassedThroughToRepo(t *testing.T) {
+	tenant := uuid.New()
+	var gotLimit, gotOffset int
+	repo := &fakeRepo{listFn: func(_ context.Context, _, _ uuid.UUID, limit, offset int) ([]domain.TenderACLEntry, error) {
+		gotLimit, gotOffset = limit, offset
+		return []domain.TenderACLEntry{}, nil
+	}}
+	h := newTestHandler(repo, &fakeChecker{}, &fakeCache{}, t)
+	c, w := buildCtx(http.MethodGet, "/?limit=25&offset=50", ``, tenderAdminCtx(tenant))
+	setParams(c, "id", tenant.String(), "tender_id", uuid.New().String())
+	h.List(c)
+	require.Equal(t, http.StatusOK, w.Code)
+	assert.Equal(t, 25, gotLimit)
+	assert.Equal(t, 50, gotOffset)
+}
+
+func TestHandler_List_LimitAboveMax_ClampedToMaxListLimit(t *testing.T) {
+	tenant := uuid.New()
+	var gotLimit int
+	repo := &fakeRepo{listFn: func(_ context.Context, _, _ uuid.UUID, limit, _ int) ([]domain.TenderACLEntry, error) {
+		gotLimit = limit
+		return []domain.TenderACLEntry{}, nil
+	}}
+	h := newTestHandler(repo, &fakeChecker{}, &fakeCache{}, t)
+	c, w := buildCtx(http.MethodGet, "/?limit=100000", ``, tenderAdminCtx(tenant))
+	setParams(c, "id", tenant.String(), "tender_id", uuid.New().String())
+	h.List(c)
+	require.Equal(t, http.StatusOK, w.Code)
+	assert.Equal(t, maxListLimit, gotLimit)
+}
+
+func TestHandler_List_InvalidLimit_Returns400(t *testing.T) {
+	tenant := uuid.New()
+	h := newTestHandler(emptyRepo(), &fakeChecker{}, &fakeCache{}, t)
+	c, w := buildCtx(http.MethodGet, "/?limit=not-a-number", ``, tenderAdminCtx(tenant))
+	setParams(c, "id", tenant.String(), "tender_id", uuid.New().String())
+	h.List(c)
+	assertErrorCode(t, w, http.StatusBadRequest, domain.ErrCodeInvalidRequest)
+}
+
+func TestHandler_List_ZeroLimit_Returns400(t *testing.T) {
+	tenant := uuid.New()
+	h := newTestHandler(emptyRepo(), &fakeChecker{}, &fakeCache{}, t)
+	c, w := buildCtx(http.MethodGet, "/?limit=0", ``, tenderAdminCtx(tenant))
+	setParams(c, "id", tenant.String(), "tender_id", uuid.New().String())
+	h.List(c)
+	assertErrorCode(t, w, http.StatusBadRequest, domain.ErrCodeInvalidRequest)
+}
+
+func TestHandler_List_NegativeOffset_Returns400(t *testing.T) {
+	tenant := uuid.New()
+	h := newTestHandler(emptyRepo(), &fakeChecker{}, &fakeCache{}, t)
+	c, w := buildCtx(http.MethodGet, "/?offset=-1", ``, tenderAdminCtx(tenant))
+	setParams(c, "id", tenant.String(), "tender_id", uuid.New().String())
+	h.List(c)
+	assertErrorCode(t, w, http.StatusBadRequest, domain.ErrCodeInvalidRequest)
+}
+
 // ── Grant (TAC-2) ────────────────────────────────────────────────────────
 
 func grantBody(userID uuid.UUID) string {
@@ -245,6 +325,17 @@ func TestHandler_Grant_InvalidTenderID_Returns400(t *testing.T) {
 	tenant := uuid.New()
 	c, w := buildCtx(http.MethodPost, "/", grantBody(uuid.New()), tenderAdminCtx(tenant))
 	setParams(c, "id", tenant.String(), "tender_id", "not-a-uuid")
+	h.Grant(c)
+	assertErrorCode(t, w, http.StatusBadRequest, domain.ErrCodeInvalidRequest)
+}
+
+func TestHandler_Grant_OversizedBody_Returns400(t *testing.T) {
+	h := newTestHandler(emptyRepo(), &fakeChecker{}, &fakeCache{}, t)
+	tenant := uuid.New()
+	oversizedReason := strings.Repeat("x", maxRequestBodyBytes+1)
+	body := `{"user_id":"` + uuid.New().String() + `","access_level":"view","reason":"` + oversizedReason + `"}`
+	c, w := buildCtx(http.MethodPost, "/", body, tenderAdminCtx(tenant))
+	setParams(c, "id", tenant.String(), "tender_id", uuid.New().String())
 	h.Grant(c)
 	assertErrorCode(t, w, http.StatusBadRequest, domain.ErrCodeInvalidRequest)
 }
@@ -505,6 +596,16 @@ func TestRespondACLError_NoDomainCode_Returns500(t *testing.T) {
 	assertErrorCode(t, w, http.StatusInternalServerError, domain.ErrCodeInternal)
 }
 
+func TestRespondACLError_LeakedConnectionPgError_Returns503(t *testing.T) {
+	w := callRespondACLError(t, &pgconn.PgError{Code: "08006"})
+	assertErrorCode(t, w, http.StatusServiceUnavailable, domain.ErrCodeDependencyUnavailable)
+}
+
+func TestRespondACLError_LeakedOperatorPgError_Returns503(t *testing.T) {
+	w := callRespondACLError(t, &pgconn.PgError{Code: "57P01"})
+	assertErrorCode(t, w, http.StatusServiceUnavailable, domain.ErrCodeDependencyUnavailable)
+}
+
 func TestRespondACLError_InvalidRequest_400(t *testing.T) {
 	w := callRespondACLError(t, domain.NewError(domain.ErrCodeInvalidRequest, "bad"))
 	assertErrorCode(t, w, http.StatusBadRequest, domain.ErrCodeInvalidRequest)
@@ -545,7 +646,7 @@ func TestRespondACLError_UnknownCode_500(t *testing.T) {
 
 func TestHandler_List_ServiceError_PropagatesError(t *testing.T) {
 	repo := emptyRepo()
-	repo.listFn = func(context.Context, uuid.UUID, uuid.UUID) ([]domain.TenderACLEntry, error) {
+	repo.listFn = func(context.Context, uuid.UUID, uuid.UUID, int, int) ([]domain.TenderACLEntry, error) {
 		return nil, domain.NewError(domain.ErrCodeDependencyUnavailable, "db down")
 	}
 	h := newTestHandler(repo, &fakeChecker{}, &fakeCache{}, t)
@@ -603,7 +704,9 @@ func TestACLGrant_Concurrent_OneSucceedsOneFails(t *testing.T) {
 			e.ID = uuid.New()
 			return e, nil
 		},
-		listFn:   func(context.Context, uuid.UUID, uuid.UUID) ([]domain.TenderACLEntry, error) { return nil, nil },
+		listFn: func(context.Context, uuid.UUID, uuid.UUID, int, int) ([]domain.TenderACLEntry, error) {
+			return nil, nil
+		},
 		revokeFn: func(context.Context, uuid.UUID, uuid.UUID, uuid.UUID, int64) error { return nil },
 	}
 	tenant, tender, user := uuid.New(), uuid.New(), uuid.New()
@@ -638,7 +741,9 @@ func TestACLGrant_Concurrent_OneSucceedsOneFails(t *testing.T) {
 func TestACLRevoke_Concurrent_BothSucceed(t *testing.T) {
 	repo := &fakeRepo{
 		revokeFn: func(context.Context, uuid.UUID, uuid.UUID, uuid.UUID, int64) error { return nil },
-		listFn:   func(context.Context, uuid.UUID, uuid.UUID) ([]domain.TenderACLEntry, error) { return nil, nil },
+		listFn: func(context.Context, uuid.UUID, uuid.UUID, int, int) ([]domain.TenderACLEntry, error) {
+			return nil, nil
+		},
 	}
 	tenant, tender, user := uuid.New(), uuid.New(), uuid.New()
 
@@ -674,7 +779,9 @@ func TestACLGrant_Revoke_Concurrent(t *testing.T) {
 			return e, nil
 		},
 		revokeFn: func(context.Context, uuid.UUID, uuid.UUID, uuid.UUID, int64) error { return nil },
-		listFn:   func(context.Context, uuid.UUID, uuid.UUID) ([]domain.TenderACLEntry, error) { return nil, nil },
+		listFn: func(context.Context, uuid.UUID, uuid.UUID, int, int) ([]domain.TenderACLEntry, error) {
+			return nil, nil
+		},
 	}
 	tenant, tender, user := uuid.New(), uuid.New(), uuid.New()
 	checker := activeChecker(uuid.New())

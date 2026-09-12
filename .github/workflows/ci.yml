@@ -214,7 +214,7 @@ jobs:
     name: Smoke tests
     runs-on: ubuntu-latest
     needs: [validate-test, build-image]
-    timeout-minutes: 10
+    timeout-minutes: 15
     steps:
       - name: Checkout
         uses: actions/checkout@v7.0.0
@@ -242,6 +242,15 @@ jobs:
       - name: Smoke tests
         run: bash .github/scripts/smoke-tests.sh
 
+      # Boots the same tender-acl-ci-test image against real Postgres/
+      # Valkey/LocalStack (docker-compose.yml) and issues real HTTP requests
+      # — smoke-tests.sh above only proves the binary exits non-zero on
+      # missing env vars, never that the shipped image actually serves
+      # traffic. This is the gate that would have caught a boot-time
+      # regression before it reached release.yml's deploy-gate.
+      - name: Real HTTP smoke test (boot + live request against Postgres/Valkey)
+        run: bash .github/scripts/smoke-http-test.sh
+
   # ── posts or updates a single comment on every PR push ───────────────────
   pr-summary:
     name: PR summary
@@ -262,7 +271,7 @@ jobs:
         uses: actions/github-script@v7.1.0
         env:
           NEEDS_JSON: ${{ toJSON(needs) }}
-          COVERAGE_THRESHOLD: '70'
+          COVERAGE_THRESHOLD: '85'
         with:
           script: |
             const fs = require('fs')

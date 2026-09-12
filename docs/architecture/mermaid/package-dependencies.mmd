@@ -2,13 +2,13 @@ graph LR
     main(["cmd/tender-acl/main.go"])
 
     domain(["internal/core/domain\n(TenderACLEntry, CachedAccess, domain.Error)"])
-    port(["internal/core/port\n(TenderACLRepository, MembershipCheckClient, Cache interfaces;\nLogger interface + SlogStyleLogger implementation)"])
+    port(["internal/core/port\n(TenderACLRepository, MembershipCheckClient, Cache, TxRunner;\nLogger interface + SlogStyleLogger implementation)"])
     service(["internal/core/service\n(ACLService — business logic)"])
     obs(["internal/adapter/outbound/metrics\n(cross-cutting OTel instruments)"])
 
     httpadapter(["internal/adapter/inbound/http\n(handler + router + DTOs)"])
-    consumeradapter(["internal/adapter/inbound/consumer\n(OffboardingConsumer + MemberRemovalConsumer + ProcessedEvents)"])
-    postgres(["internal/adapter/outbound/postgres\n(TenderACLRepository impl)"])
+    consumeradapter(["internal/adapter/inbound/consumer\n(OffboardingConsumer + MemberRemovalConsumer)"])
+    postgres(["internal/adapter/outbound/postgres\n(TenderACLRepository + ProcessedEvents + TxRunner)"])
     valkey(["internal/adapter/outbound/valkey\n(Cache impl)"])
     membershipcheck(["internal/adapter/outbound/membershipcheck\n(HTTPChecker impl)"])
 

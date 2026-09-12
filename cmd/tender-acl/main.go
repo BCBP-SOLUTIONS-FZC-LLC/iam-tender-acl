@@ -1,6 +1,6 @@
 // Command tender-acl runs the Tender ACL Service: the system of record for
 // tender_acl_entries, extracted from iam-org-membership per ADR-0007 Wave
-// 3 (see tender-acl-service-lld.md). It exposes the tenant-admin
+// 3 (see docs/lld/iam-lld-tender-acl-service.md). It exposes the tenant-admin
 // grant/revoke/list surface (TAC-1/2/3) and the internal service-to-service
 // access check (TAC-4/I-12), enforces a grant-time-only membership check
 // against iam-org-membership in place of the composite FK this table lost,
@@ -36,6 +36,7 @@ import (
 	gincommon "github.com/BCBP-SOLUTIONS-FZC-LLC/platform-gincommon/pkg/gincommon"
 	"github.com/BCBP-SOLUTIONS-FZC-LLC/platform-gincommon/pkg/logger"
 	pgcommon "github.com/BCBP-SOLUTIONS-FZC-LLC/platform-pgcommon/pkg/pgcommon"
+	"github.com/BCBP-SOLUTIONS-FZC-LLC/platform-pgcommon/pkg/pgmetrics"
 )
 
 // buildVersion is stamped at build time via -ldflags="-X main.buildVersion=...".
@@ -69,14 +70,50 @@ func run() error {
 	}
 	svcLog := port.NewSlogStyleLogger(log)
 
+	// Same composition-root order as iam-org-membership / iam-realm-provisioner:
+	//   1. InitTracing so in-process spans get valid trace IDs even before
+	//      the HTTP engine is built (migrations, pool connect, consumers).
+	//   2. ObservabilityMiddlewares as gincommon's public metrics-init API
+	//      BEFORE any collector registration, so business / events metrics
+	//      land on gincommon.MetricsRegisterer with matching {service,
+	//      version} const labels.
+	// NewRouter applies the same middleware slice to the Gin engine;
+	// gincommon's metrics.Init is sync.Once, EnsureInitTelemetry is a
+	// no-op once the SDK provider is installed.
+	serviceName := "tender-acl"
+	version := getEnv("BUILD_VERSION", buildVersion)
+	ginCfg := gincommon.Config{
+		Logger:       log,
+		ServiceName:  serviceName,
+		BuildVersion: version,
+	}
+	shutdownTracing := gincommon.InitTracing(serviceName, version, os.Getenv("OTEL_EXPORTER_OTLP_ENDPOINT"))
+	defer func() {
+		shutdownTracing()
+		if shutdownErr := gincommon.Shutdown(log); shutdownErr != nil {
+			fmt.Fprintf(os.Stderr, "telemetry shutdown failed: %v\n", shutdownErr)
+		}
+	}()
+	_ = gincommon.ObservabilityMiddlewares(ginCfg)
+	tracer := otel.Tracer(serviceName)
+
+	// platform-events consumer metrics and platform-pgcommon query/pool
+	// metrics share gincommon's registerer so a single /metrics scrape
+	// (promhttp on METRICS_PORT) serves HTTP + business + consume + pg
+	// collectors together — same order as iam-org-membership /
+	// iam-realm-provisioner (ObservabilityMiddlewares first, then
+	// collectors). The SQS consumer internals already call Record*
+	// unconditionally; they no-op until InitWithRegisterer runs once.
+	events.InitWithRegisterer(ginCfg.ServiceName, ginCfg.BuildVersion, gincommon.MetricsRegisterer())
+	pgmetrics.InitWithRegisterer(ginCfg.ServiceName, ginCfg.BuildVersion, gincommon.MetricsRegisterer())
+
 	// SQS_QUEUE_URL and every other tenant-lifecycle-tenderacl-q tunable
 	// (SQS_MAX_MESSAGES/SQS_WAIT_SECONDS/SQS_VISIBILITY_TIMEOUT/
 	// SQS_CONCURRENCY/SQS_MAX_RECEIVE_COUNT) are loaded from
 	// platform-events/pkg/config rather than hand-rolled here, matching
-	// pgcommon.ConfigFromEnv's precedent below — this is the queue LoadSQS
-	// was designed for (a single queue per service); member-removal-
-	// tenderacl-q below has no such helper (LoadSQS has no concept of a
-	// second queue) and stays hand-rolled in config.go/loadConfig.
+	// pgcommon.ConfigFromEnv's precedent below. member-removal-tenderacl-q
+	// clones this env and overrides QueueURL + concurrency so both
+	// subscriptions still go through SQSConfigFromEnv / SQSConsumerOptions.
 	sqsEnv := eventsconfig.LoadSQS()
 	if validateErr := sqsEnv.Validate(); validateErr != nil {
 		return fmt.Errorf("load SQS config: %w", validateErr)
@@ -85,30 +122,6 @@ func run() error {
 
 	baseCtx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
-
-	// Tracing is entirely gincommon's: httpadapter.NewRouter's
-	// gincommon.ObservabilityMiddlewares call lazily installs the real OTel
-	// TracerProvider (via the Tracing options below) the first time it
-	// runs — there is no separate hand-rolled TracerProvider/exporter setup
-	// in this process. otel.Tracer returns a delegating handle that's safe
-	// to obtain before that installation happens and use afterward (the
-	// OTel SDK's documented global-provider swap behavior).
-	insecure := cfg.Environment != "production"
-	sampleRatio := 1.0
-	if cfg.Environment == "production" {
-		sampleRatio = 0.1
-	}
-	tracing := &gincommon.TracingOptions{
-		Endpoint:    cfg.OTELExporterOTLPEndpoint,
-		Insecure:    &insecure,
-		SampleRatio: &sampleRatio,
-	}
-	tracer := otel.Tracer("tender-acl")
-	defer func() {
-		if shutdownErr := gincommon.Shutdown(nil); shutdownErr != nil {
-			log.Error("telemetry shutdown failed", map[string]any{"error": shutdownErr.Error()})
-		}
-	}()
 
 	if err = aclpostgres.RunMigrations(baseCtx, cfg.MigrationDatabaseURL, aclpostgres.NewLoggerAdapter(log)); err != nil {
 		return fmt.Errorf("run migrations: %w", err)
@@ -131,59 +144,28 @@ func run() error {
 	// PG_BOUNCER_MODE — because transaction-scoped GUCs are required for
 	// correctness here regardless of deployment topology (LLD §17.5 Case 5,
 	// the no-GUC-leakage-across-pooled-connection test); this is not a
-	// tunable, so it isn't left to configuration to get right.
+	// tunable, so it isn't left to configuration to get right. MinConns is
+	// forced 0 with it: idle backends under transaction pooling pin
+	// session state (same helm default as iam-org-membership /
+	// iam-realm-provisioner).
 	pgCfg.PGBouncerMode = true
+	pgCfg.MinConns = 0
 	pgCfg.Logger = aclpostgres.NewLoggerAdapter(log)
-	pgCfg.Tracer = otelSpanTracer{tracer: tracer}
+	pgCfg.Tracer = aclpostgres.NewOTelTracer(serviceName)
 	pgPool, err := pgcommon.NewPool(baseCtx, pgCfg)
 	if err != nil {
 		return fmt.Errorf("connect to postgres: %w", err)
 	}
-	// DrainAndClose, not a bare Close — LLD §16.4's documented shutdown
-	// sequence. Registered before rawPool's below so it runs last (LIFO):
-	// this is the RLS-bound pool every TAC-1/2/3/4 request and both
-	// consumers' repository calls go through, so it should be the last
-	// thing to stop accepting new work. In practice httpServer.Shutdown and
-	// both consumers' Stop() (the shutdown goroutine below) already wait
-	// for in-flight work to finish before this defer ever runs, so the
-	// drain here should always complete immediately — DrainAndClose is
-	// still the correct call over Close, as defense in depth against that
-	// ordering ever changing.
+	// Close is the safety net siblings register immediately after NewPool
+	// (panic / early-return). DrainAndClose is LLD §16.4's documented
+	// shutdown sequence and is registered next so it runs first (LIFO);
+	// Close is then idempotent.
+	defer pgPool.Close()
 	defer func() {
 		drainCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
 		if drainErr := pgPool.DrainAndClose(drainCtx); drainErr != nil {
 			log.Error("postgres pool drain failed", map[string]any{"error": drainErr.Error()})
-		}
-	}()
-
-	// processed_events carries no RLS (LLD §7.3) and is accessed only by the
-	// two consumers via the service role — a second pgcommon.Pool on the
-	// same DSN, entirely separate from the RLS-bound pool above (which has
-	// no exported accessor to an underlying raw pool) but still going
-	// through pgcommon.NewPool rather than a bare pgxpool.New: no
-	// GUCProvider is set, so no GUC injection is ever attempted for this
-	// table, but this pool still gets the same slow-query logging and OTel
-	// query spans as the main pool, instead of being entirely invisible to
-	// both (a prior version used a bare *pgxpool.Pool here and had neither).
-	rawPoolCfg := pgcommon.Config{
-		DSN:           cfg.DatabaseURL,
-		PGBouncerMode: pgCfg.PGBouncerMode,
-		Logger:        aclpostgres.NewLoggerAdapter(log),
-		Tracer:        otelSpanTracer{tracer: tracer},
-	}
-	rawPool, err := pgcommon.NewPool(baseCtx, rawPoolCfg)
-	if err != nil {
-		return fmt.Errorf("connect raw postgres pool: %w", err)
-	}
-	// Same DrainAndClose reasoning as pgPool above — this defer runs before
-	// pgPool's (LIFO), so processed_events stops accepting new WithConn
-	// calls slightly ahead of the main pool.
-	defer func() {
-		drainCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-		defer cancel()
-		if drainErr := rawPool.DrainAndClose(drainCtx); drainErr != nil {
-			log.Error("raw postgres pool drain failed", map[string]any{"error": drainErr.Error()})
 		}
 	}()
 
@@ -195,39 +177,24 @@ func run() error {
 	}()
 	aclCache := valkey.NewCache(valkeyClient)
 
-	// gincommon.MetricsRegisterer() is safe to call before
-	// ObservabilityMiddlewares runs (falls back to prometheus.DefaultRegisterer
-	// until gincommon's own Init runs, which is exactly the registry these
-	// collectors were already implicitly using) — same precedent as
-	// iam-user-profile's cmd/server/main.go.
+	// ObservabilityMiddlewares already ran above, so MetricsRegisterer and
+	// MetricsConstLabels are gincommon's real registry / {service, version}
+	// labels — same order as iam-org-membership / iam-realm-provisioner.
 	svcMetrics, err := metrics.NewMetrics(gincommon.MetricsRegisterer())
 	if err != nil {
 		return fmt.Errorf("build metrics: %w", err)
 	}
 
-	// Activates platform-events' own consumer-side Prometheus metrics —
-	// events_consumed_total, events_consume_duration_seconds, and
-	// sqs_receive/delete/visibility_extension_errors_total (the latter two
-	// the library's own docs flag as causing duplicate delivery when
-	// non-zero, exactly the failure mode this service's processed_events
-	// idempotency ledger exists to survive). No other wiring needed:
-	// internal/adapter/outbound/sqs's consumer already calls the
-	// corresponding Record* functions unconditionally at every relevant
-	// point for both queues below — they no-op until Init/InitWithRegisterer
-	// runs once, which a prior version of this process never called.
-	// InitWithRegisterer (not Init, which always uses
-	// prometheus.DefaultRegisterer) to match the explicit-registerer
-	// convention above.
-	events.InitWithRegisterer("tender-acl", buildVersion, gincommon.MetricsRegisterer())
-
 	checker := membershipcheck.NewHTTPChecker(cfg.CoreInternalBaseURL, nil, cfg.MembershipCheckTimeout)
 
 	repo := aclpostgres.NewTenderACLRepository(pgPool)
-	// One ProcessedEvents instance per consumer — the composite (event_id,
-	// consumer) key in processed_events discriminates between them, so
-	// they safely share the one table.
-	offboardingProcessedEvents := consumer.NewProcessedEvents(rawPool, "tenant_lifecycle_cleanup")
-	memberRemovalProcessedEvents := consumer.NewProcessedEvents(rawPool, "member_removal")
+	txRunner := aclpostgres.NewTxRunner(pgPool)
+	// One ProcessedEvents instance per consumer, on the same pool as
+	// TenderACLRepository so cascade + MarkProcessed join one TxRunner
+	// transaction (IDEMP-2). The composite (event_id, consumer) key
+	// discriminates between them.
+	offboardingProcessedEvents := aclpostgres.NewProcessedEvents(pgPool, "tenant_lifecycle_cleanup")
+	memberRemovalProcessedEvents := aclpostgres.NewProcessedEvents(pgPool, "member_removal")
 
 	svc := service.NewACLService(repo, checker, aclCache, svcMetrics, svcLog, tracer)
 	handler := httpadapter.NewHandler(svc)
@@ -236,11 +203,14 @@ func run() error {
 		Enabled:     cfg.DocsEnabled,
 		AuthToken:   cfg.DocsAuthToken,
 	}
-	router := httpadapter.NewRouter(handler, pgPool, aclCache, log, tracing, docs)
+	router := httpadapter.NewRouter(handler, pgPool, aclCache, log, ginCfg.Tracing, docs)
 
 	httpServer := &http.Server{
 		Addr:              ":" + cfg.HTTPPort,
 		Handler:           router.Handler(),
+		ReadTimeout:       15 * time.Second,
+		WriteTimeout:      35 * time.Second, // 30s TimeoutMiddleware + 5s buffer
+		IdleTimeout:       60 * time.Second,
 		ReadHeaderTimeout: 5 * time.Second,
 	}
 
@@ -252,7 +222,7 @@ func run() error {
 		ReadHeaderTimeout: 5 * time.Second,
 	}
 
-	offboardingConsumer := consumer.NewOffboardingConsumer(repo, offboardingProcessedEvents, svcMetrics, svcLog, tracer)
+	offboardingConsumer := consumer.NewOffboardingConsumer(repo, offboardingProcessedEvents, txRunner, svcMetrics, svcLog, tracer)
 	eventsConsumer, err := events.NewSQSConsumer(
 		eventsconfig.SQSConfigFromEnv(sqsEnv, log),
 		offboardingConsumer.Handle,
@@ -277,25 +247,29 @@ func run() error {
 	// offboarding one above, not a discriminated payload on the same
 	// queue, so each cascade's failure mode (and DLQ depth alert) stays
 	// independently observable.
-	memberRemovalConsumer := consumer.NewMemberRemovalConsumer(repo, memberRemovalProcessedEvents, svcMetrics, svcLog, tracer)
+	memberRemovalConsumer := consumer.NewMemberRemovalConsumer(repo, memberRemovalProcessedEvents, txRunner, svcMetrics, svcLog, tracer)
+	// LoadSQS covers one queue's env names. Clone it and override URL +
+	// concurrency so queue #2 still goes through SQSConfigFromEnv /
+	// SQSConsumerOptions (same MaxMessages/WaitSeconds/VisibilityTimeout
+	// as queue #1) rather than a hand-rolled events.SQSConfig literal.
+	memberRemovalSQS := sqsEnv
+	memberRemovalSQS.QueueURL = cfg.MemberRemovalQueueURL
+	consumerConcurrency, err := getEnvInt("CONSUMER_CONCURRENCY", 4)
+	if err != nil {
+		return err
+	}
+	memberRemovalConcurrency, err := getEnvInt("MEMBER_REMOVAL_SQS_CONCURRENCY", consumerConcurrency)
+	if err != nil {
+		return err
+	}
+	memberRemovalSQS.Concurrency = memberRemovalConcurrency
+	memberRemovalSQS.Warnings = nil
 	memberRemovalEventsConsumer, err := events.NewSQSConsumer(
-		events.SQSConfig{
-			QueueURL: cfg.MemberRemovalQueueURL,
-			Region:   cfg.AWSRegion,
-			Logger:   log,
-		},
+		eventsconfig.SQSConfigFromEnv(memberRemovalSQS, log),
 		memberRemovalConsumer.Handle,
-		events.WithConcurrency(getEnvInt("CONSUMER_CONCURRENCY", 4)),
 		// See the offboarding consumer above: redrive is member-removal-tenderacl-q's
 		// own SQS redrive policy, not an in-process WithDeadLetterHandler.
-		//
-		// This queue stays hand-rolled rather than going through
-		// platform-events/pkg/config like the offboarding consumer above:
-		// LoadSQS()/SQSConfigFromEnv/SQSConsumerOptions read one fixed,
-		// unparameterized set of env var names (SQS_QUEUE_URL,
-		// SQS_CONCURRENCY, ...) with no concept of a second queue, so they
-		// can only serve one of this service's two independent
-		// subscriptions.
+		eventsconfig.SQSConsumerOptions(memberRemovalSQS)...,
 	)
 	if err != nil {
 		return fmt.Errorf("build member-removal-tenderacl-q consumer: %w", err)
@@ -363,7 +337,7 @@ func run() error {
 	return group.Wait()
 }
 
-func runProcessedEventsCleanup(ctx context.Context, repo *consumer.ProcessedEvents, interval time.Duration, log port.SlogStyleLogger) {
+func runProcessedEventsCleanup(ctx context.Context, repo *aclpostgres.ProcessedEvents, interval time.Duration, log port.SlogStyleLogger) {
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 	for {

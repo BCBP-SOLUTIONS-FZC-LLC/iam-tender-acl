@@ -25,11 +25,11 @@ graph TD
     end
 
     subgraph consumeradapter["internal/adapter/inbound/consumer/  —  SQS adapter"]
-        consumerimpl["OffboardingConsumer + MemberRemovalConsumer + ProcessedEvents\ntenant-lifecycle-tenderacl-q (tenant cascade) +\nmember-removal-tenderacl-q (per-user cascade, Wave 3 Phase 3)\ncheck-then-mark idempotency, independent consumer names\nCascadeDeleter/UserRemovalCascader/CascadeMetrics/MemberRemovalMetrics\ninterfaces declared LOCALLY (narrow slices of port.TenderACLRepository\nand the observability component), Interface-Segregation style"]
+        consumerimpl["OffboardingConsumer + MemberRemovalConsumer\ntenant-lifecycle-tenderacl-q (tenant cascade) +\nmember-removal-tenderacl-q (per-user cascade, Wave 3 Phase 3)\nskipDuplicate + TxRunner cascade+MarkProcessed (IDEMP-2)\nCascadeDeleter/UserRemovalCascader/CascadeMetrics/MemberRemovalMetrics\ninterfaces declared LOCALLY (narrow slices of port.TenderACLRepository\nand the observability component), Interface-Segregation style"]
     end
 
     subgraph pgadapter["internal/adapter/outbound/postgres/  —  persistence adapter"]
-        repo["repository.go — TenderACLRepository (pgx impl), incl. CascadeDeleteForTenant\ndb.go — DSNFromEnv/ApplyStatementTimeout/MigrationDSNFromEnv\nlogger_adapter.go — port.Logger to pgcommon's domain.Logger\nmigrations/ — schema, RLS, touch_row(), roles"]
+        repo["repository.go — TenderACLRepository (pgx impl), incl. CascadeDeleteForTenant\ndb.go — DSNFromEnv/ApplyStatementTimeout/MigrationDSNFromEnv/LedgerPoolConfig/TxRunner/withPool\nprocessed_events.go — idempotency ledger\nlogger_adapter.go — port.Logger to pgcommon's domain.Logger\nmigrations/ — schema, RLS, touch_row(), roles"]
     end
 
     subgraph valkeyadapter["internal/adapter/outbound/valkey/  —  cache adapter"]

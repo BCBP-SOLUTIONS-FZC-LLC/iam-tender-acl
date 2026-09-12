@@ -1,7 +1,7 @@
 // Package membershipcheck is the HTTP adapter implementing
 // port.MembershipCheckClient against iam-org-membership — replacing the
 // composite FK this table lost when it moved out of Core's database
-// (tender-acl-service-lld.md §6, §7.6.2). It exists specifically so Wave 4
+// (docs/lld/iam-lld-tender-acl-service.md §6, §7.6.2). It exists specifically so Wave 4
 // (folding this service into the Tender Service, ADR-0007 Option D) can
 // repoint or delete this dependency cheaply.
 package membershipcheck
@@ -93,9 +93,14 @@ func (c *HTTPChecker) Exists(ctx context.Context, tenantID, userID uuid.UUID) (b
 		return false, uuid.UUID{}, nil
 	}
 
-	var membershipID uuid.UUID
-	if out.TenantMembershipID != nil {
-		membershipID = *out.TenantMembershipID
+	// The provider contract (LLD §7.6.2, TAC-D11) always returns
+	// tenant_membership_id alongside active:true — this field replaces the
+	// composite FK this table lost, and tender_acl_entries.tenant_membership_id
+	// is NOT NULL. A response missing it is a contract violation, not a
+	// valid "active" result: fail closed rather than writing a placeholder
+	// zero UUID into the one integrity guarantee this field exists to provide.
+	if out.TenantMembershipID == nil || *out.TenantMembershipID == uuid.Nil {
+		return false, uuid.UUID{}, fmt.Errorf("membershipcheck: active:true response missing tenant_membership_id")
 	}
-	return true, membershipID, nil
+	return true, *out.TenantMembershipID, nil
 }

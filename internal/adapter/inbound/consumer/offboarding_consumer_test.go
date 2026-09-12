@@ -32,10 +32,27 @@ type fakeIdempotencyStore struct {
 }
 
 func (f *fakeIdempotencyStore) IsProcessed(ctx context.Context, eventID uuid.UUID) (bool, error) {
-	return f.isProcessedFn(ctx, eventID)
+	if f.isProcessedFn != nil {
+		return f.isProcessedFn(ctx, eventID)
+	}
+	return false, nil
 }
 func (f *fakeIdempotencyStore) MarkProcessed(ctx context.Context, eventID uuid.UUID) error {
-	return f.markProcessedFn(ctx, eventID)
+	if f.markProcessedFn != nil {
+		return f.markProcessedFn(ctx, eventID)
+	}
+	return nil
+}
+
+type fakeTxRunner struct {
+	err error
+}
+
+func (f fakeTxRunner) RunInTx(ctx context.Context, fn func(context.Context) error) error {
+	if f.err != nil {
+		return f.err
+	}
+	return fn(ctx)
 }
 
 // mu guards results: TestOffboarding_ConcurrentReplicas_Idempotent shares
@@ -71,8 +88,14 @@ func (f *fakeCascadeMetrics) RecordUnexpectedEventType(_ context.Context, queue,
 	f.results = append(f.results, queue+":"+eventType)
 }
 
+func (f *fakeCascadeMetrics) RecordProcessedEventsDuplicate(_ context.Context, consumer string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.results = append(f.results, "duplicate:"+consumer)
+}
+
 func newTestConsumer(repo CascadeDeleter, idem IdempotencyStore, metrics CascadeMetrics) *OffboardingConsumer {
-	return NewOffboardingConsumer(repo, idem, metrics, port.SlogStyleLogger{}, otel.Tracer("test"))
+	return NewOffboardingConsumer(repo, idem, fakeTxRunner{}, metrics, port.SlogStyleLogger{}, otel.Tracer("test"))
 }
 
 func offboardedEnvelope(eventID, tenantID uuid.UUID) events.Envelope[json.RawMessage] {
@@ -123,10 +146,12 @@ func TestConsumer_Handle_DuplicateEvent_SkipsCascade(t *testing.T) {
 			return nil
 		},
 	}
-	c := newTestConsumer(repo, idem, &fakeCascadeMetrics{})
+	metrics := &fakeCascadeMetrics{}
+	c := newTestConsumer(repo, idem, metrics)
 
 	err := c.Handle(context.Background(), offboardedEnvelope(eventID, tenantID))
 	require.NoError(t, err)
+	assert.Equal(t, []string{"duplicate:tenant_lifecycle_cleanup"}, metrics.results)
 }
 
 func TestConsumer_Handle_WrongEventType_SkippedNoError(t *testing.T) {
@@ -134,14 +159,37 @@ func TestConsumer_Handle_WrongEventType_SkippedNoError(t *testing.T) {
 		t.Fatal("cascade must not run for an unexpected event type")
 		return 0, nil
 	}}
+	var markCalled bool
+	idem := &fakeIdempotencyStore{
+		markProcessedFn: func(context.Context, uuid.UUID) error {
+			markCalled = true
+			return nil
+		},
+	}
 	metrics := &fakeCascadeMetrics{}
-	c := newTestConsumer(repo, &fakeIdempotencyStore{}, metrics)
+	c := newTestConsumer(repo, idem, metrics)
 
 	env := events.Envelope[json.RawMessage]{ID: uuid.New().String(), Type: "SomeOtherEvent", TenantID: uuid.New().String(), Timestamp: time.Now().UTC()}
 	handleErr := c.Handle(context.Background(), env)
 	require.NoError(t, handleErr)
+	assert.True(t, markCalled, "unknown event types must MarkProcessed so redelivery does not storm")
 	assert.Equal(t, []string{"tenant-lifecycle-tenderacl-q:SomeOtherEvent"}, metrics.results,
 		"an unexpected event type must be observable as a metric, not just a log line")
+}
+
+// TestConsumer_Handle_UnknownEventType_AckFails_ReturnsError covers the
+// branch where an unrecognized event type's own MarkProcessed (inside
+// ackUnknown) fails — Handle must propagate that error rather than
+// silently acking, so the message stays on the queue for redelivery.
+func TestConsumer_Handle_UnknownEventType_AckFails_ReturnsError(t *testing.T) {
+	idem := &fakeIdempotencyStore{
+		markProcessedFn: func(context.Context, uuid.UUID) error { return errors.New("ledger insert failed") },
+	}
+	c := newTestConsumer(&fakeCascadeDeleter{}, idem, &fakeCascadeMetrics{})
+
+	env := events.Envelope[json.RawMessage]{ID: uuid.New().String(), Type: "SomeOtherEvent", TenantID: uuid.New().String(), Timestamp: time.Now().UTC()}
+	err := c.Handle(context.Background(), env)
+	assert.Error(t, err)
 }
 
 func TestConsumer_Handle_MissingEventID_ReturnsError(t *testing.T) {

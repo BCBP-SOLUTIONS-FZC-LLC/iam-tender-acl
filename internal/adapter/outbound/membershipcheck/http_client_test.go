@@ -47,7 +47,7 @@ func TestHTTPChecker_Exists_PropagatesTraceparent(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		gotTraceparent = r.Header.Get("traceparent")
 		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(map[string]any{"active": true})
+		_ = json.NewEncoder(w).Encode(map[string]any{"active": true, "tenant_membership_id": uuid.New().String()})
 	}))
 	defer server.Close()
 
@@ -122,8 +122,11 @@ func TestHTTPChecker_Exists_Timeout_ReturnsError(t *testing.T) {
 }
 
 // TestHTTPChecker_Exists_ActiveWithNoMembershipID covers the branch where the
-// response is active:true but tenant_membership_id is omitted — the client
-// must return (true, zero-UUID, nil) rather than an error.
+// response is active:true but tenant_membership_id is omitted. This violates
+// the provider contract (LLD §7.6.2, TAC-D11) — tenant_membership_id replaces
+// the composite FK this table lost, and tender_acl_entries.tenant_membership_id
+// is NOT NULL — so the client must fail CLOSED (return an error) rather than
+// return a placeholder zero UUID that would be written as if it were valid.
 func TestHTTPChecker_Exists_ActiveWithNoMembershipID(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
@@ -134,9 +137,26 @@ func TestHTTPChecker_Exists_ActiveWithNoMembershipID(t *testing.T) {
 
 	checker := NewHTTPChecker(server.URL, nil, 0)
 	active, membershipID, err := checker.Exists(t.Context(), uuid.New(), uuid.New())
-	require.NoError(t, err)
-	assert.True(t, active)
-	assert.Equal(t, uuid.UUID{}, membershipID, "no membership ID in response → zero UUID")
+	require.Error(t, err, "active:true with no tenant_membership_id must fail closed")
+	assert.False(t, active)
+	assert.Equal(t, uuid.UUID{}, membershipID)
+}
+
+// TestHTTPChecker_Exists_ActiveWithNilMembershipID covers the same contract
+// violation when tenant_membership_id is present but explicitly the nil
+// UUID, rather than omitted — both must fail closed identically.
+func TestHTTPChecker_Exists_ActiveWithNilMembershipID(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"active":true,"tenant_membership_id":"00000000-0000-0000-0000-000000000000"}`))
+	}))
+	defer server.Close()
+
+	checker := NewHTTPChecker(server.URL, nil, 0)
+	active, membershipID, err := checker.Exists(t.Context(), uuid.New(), uuid.New())
+	require.Error(t, err, "active:true with a nil-UUID tenant_membership_id must fail closed")
+	assert.False(t, active)
+	assert.Equal(t, uuid.UUID{}, membershipID)
 }
 
 func TestHTTPChecker_Exists_NetworkError_ReturnsError(t *testing.T) {

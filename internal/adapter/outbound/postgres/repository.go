@@ -13,7 +13,6 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
-	"github.com/jackc/pgx/v5/pgconn"
 
 	"github.com/BCBP-SOLUTIONS-FZC-LLC/iam-tender-acl/internal/core/domain"
 	"github.com/BCBP-SOLUTIONS-FZC-LLC/iam-tender-acl/internal/core/port"
@@ -22,58 +21,35 @@ import (
 )
 
 // withTenant runs fn inside a transaction with app.tenant_id bound as a
-// transaction-local GUC for tenantID, via pgcommon.RunInTx's PgBouncer-mode
-// GUC injection (pool.go/tx.go — see platform-pgcommon). The GUC is set
+// transaction-local GUC for tenantID, via pgcommon.RunInTxWithRetryOpts's
+// PgBouncer-mode GUC injection (pool.go/tx.go — see platform-pgcommon).
+// Contended writes retry on deadlock (40P01) / serialization failure
+// (40001) with the same writeRetryOpts iam-org-membership /
+// iam-realm-provisioner use. The GUC is set
 // directly from tenantID here, independent of any gincommon RequestContext,
 // so this works identically whether the caller is an HTTP handler or the
 // tenant-offboarding consumer (which has no HTTP request at all).
 //
+// When ctx already carries a pgx.Tx from TxRunner.RunInTx, fn joins that
+// transaction instead of opening a nested one — consumers bind the tenant
+// GUC first so GUCProvider injects SET LOCAL at the outer RunInTx, then
+// cascade + MarkProcessed share the commit (IDEMP-2).
+//
 // WithValidatedGUCSet, not the plain WithGUCSet: pgcommon's own docs call
 // this the preferred helper, since it catches an inconsistent GUCSet (here,
 // that could only mean a future caller starts setting UserID without
-// TenantID) at injection time rather than deep inside RunInTx. Not routed
-// through wrapConnErr below — a validation failure is a programming error,
-// not a connectivity failure, so it must not be misclassified as
-// dependency_unavailable.
+// TenantID) at injection time rather than deep inside RunInTx. A validation
+// failure is a programming error, not a connectivity failure, so it is not
+// routed through wrapConnErr.
 func withTenant(ctx context.Context, pool *pgcommon.Pool, tenantID uuid.UUID, fn func(context.Context, pgx.Tx) error) error {
 	ctx, err := pgcommon.WithValidatedGUCSet(ctx, pgdomain.GUCSet{TenantID: tenantID.String()})
 	if err != nil {
 		return fmt.Errorf("withTenant: invalid GUCSet for tenant %s: %w", tenantID, err)
 	}
-	return wrapConnErr(pgcommon.RunInTx(ctx, pool, pgx.TxOptions{}, fn))
-}
-
-// wrapConnErr converts a connectivity failure (network unreachable, pool
-// exhausted, TLS handshake, etc.) into domain.ErrCodeDependencyUnavailable
-// so respondACLError surfaces it as 503, matching LLD §12.3/§20's
-// documented behavior — previously dead code, since nothing in this
-// package classified errors this way and a bare pgx/network error fell
-// through respondACLError's default case to 500 instead. Errors that are
-// already classified (a *domain.Error from IsUniqueViolation/optimistic-lock
-// handling elsewhere in this package), a *pgconn.PgError (the server
-// responded with a SQL error, not a connectivity failure), pgx.ErrNoRows,
-// or a context cancellation/deadline (request-level, not a dependency
-// outage) all pass through unchanged — mirrors iam-user-profile's
-// identical wrapConnErr.
-func wrapConnErr(err error) error {
-	if err == nil {
-		return nil
+	if tx, ok := TxFromContext(ctx); ok {
+		return wrapConnErr(fn(ctx, tx))
 	}
-	var de *domain.Error
-	if errors.As(err, &de) {
-		return err
-	}
-	var pgErr *pgconn.PgError
-	if errors.As(err, &pgErr) {
-		return err
-	}
-	if errors.Is(err, pgx.ErrNoRows) {
-		return err
-	}
-	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
-		return err
-	}
-	return domain.NewError(domain.ErrCodeDependencyUnavailable, "database unavailable: "+err.Error())
+	return wrapConnErr(pgcommon.RunInTxWithRetryOpts(ctx, pool, pgx.TxOptions{}, writeRetryOpts, fn))
 }
 
 // TenderACLRepository implements port.TenderACLRepository against
@@ -125,13 +101,16 @@ func collectEntries(rows pgx.Rows) ([]domain.TenderACLEntry, error) {
 	return result, rows.Err()
 }
 
-// List implements TAC-1.
-func (r *TenderACLRepository) List(ctx context.Context, tenantID, tenderID uuid.UUID) ([]domain.TenderACLEntry, error) {
+// List implements TAC-1. limit/offset are the already-validated, already-
+// clamped pagination window (handler.go's parseListPagination) — this layer
+// trusts them as-is rather than re-deriving defaults.
+func (r *TenderACLRepository) List(ctx context.Context, tenantID, tenderID uuid.UUID, limit, offset int) ([]domain.TenderACLEntry, error) {
 	var result []domain.TenderACLEntry
 	err := withTenant(ctx, r.pool, tenantID, func(ctx context.Context, tx pgx.Tx) error {
 		rows, err := tx.Query(ctx, selectColumnsSQL+`
 			WHERE tenant_id = $1 AND tender_id = $2 AND deleted_at IS NULL
-			ORDER BY created_at`, tenantID, tenderID)
+			ORDER BY created_at
+			LIMIT $3 OFFSET $4`, tenantID, tenderID, limit, offset)
 		if err != nil {
 			return fmt.Errorf("query tender_acl_entries: %w", err)
 		}

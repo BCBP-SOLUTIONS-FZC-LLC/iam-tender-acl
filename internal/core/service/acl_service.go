@@ -51,12 +51,14 @@ func NewACLService(repo port.TenderACLRepository, checker port.MembershipCheckCl
 	return &ACLService{repo: repo, checker: checker, cache: cache, metrics: metrics, logger: logger, tracer: tracer}
 }
 
-// List implements TAC-1.
-func (s *ACLService) List(ctx context.Context, tenantID, tenderID uuid.UUID) ([]domain.TenderACLEntry, error) {
+// List implements TAC-1. limit/offset are the caller's already-validated,
+// already-clamped pagination window (see handler.go's parseListPagination) —
+// this layer does not re-derive defaults, it only passes them through.
+func (s *ACLService) List(ctx context.Context, tenantID, tenderID uuid.UUID, limit, offset int) ([]domain.TenderACLEntry, error) {
 	ctx, span := s.tracer.Start(ctx, "service.ACLService.List")
 	defer span.End()
 
-	entries, err := s.repo.List(ctx, tenantID, tenderID)
+	entries, err := s.repo.List(ctx, tenantID, tenderID, limit, offset)
 	if err != nil {
 		return nil, fmt.Errorf("acl: list: %w", err)
 	}

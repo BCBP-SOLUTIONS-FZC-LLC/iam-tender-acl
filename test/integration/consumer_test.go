@@ -43,7 +43,7 @@ func TestOffboardingConsumer_Handle_CascadesAgainstRealPostgres(t *testing.T) {
 	require.NoError(t, err)
 
 	metrics := testMetrics(t)
-	c := consumer.NewOffboardingConsumer(repo, processedEvents, metrics, port.SlogStyleLogger{}, otel.Tracer("test"))
+	c := consumer.NewOffboardingConsumer(repo, processedEvents, txRunner, metrics, port.SlogStyleLogger{}, otel.Tracer("test"))
 
 	eventID := uuid.New()
 	require.NoError(t, c.Handle(ctx, offboardedEnvelope(t, eventID, tenantID)))
@@ -71,7 +71,7 @@ func TestOffboardingConsumer_Handle_DuplicateDelivery_CascadesOnce(t *testing.T)
 	require.NoError(t, err)
 
 	metrics := testMetrics(t)
-	c := consumer.NewOffboardingConsumer(repo, processedEvents, metrics, port.SlogStyleLogger{}, otel.Tracer("test"))
+	c := consumer.NewOffboardingConsumer(repo, processedEvents, txRunner, metrics, port.SlogStyleLogger{}, otel.Tracer("test"))
 	eventID := uuid.New()
 	msg := offboardedEnvelope(t, eventID, tenantID)
 
@@ -144,7 +144,7 @@ func TestMemberRemovalConsumer_Handle_SoftDeletesAgainstRealPostgres(t *testing.
 	require.NoError(t, err)
 
 	metrics := testMetrics(t)
-	c := consumer.NewMemberRemovalConsumer(repo, memberRemovalProcessedEvents, metrics, port.SlogStyleLogger{}, otel.Tracer("test"))
+	c := consumer.NewMemberRemovalConsumer(repo, memberRemovalProcessedEvents, txRunner, metrics, port.SlogStyleLogger{}, otel.Tracer("test"))
 
 	eventID := uuid.New()
 	require.NoError(t, c.Handle(ctx, memberRemovedEnvelope(t, eventID, tenantID, userA)))
@@ -189,7 +189,7 @@ func TestMemberRemovalConsumer_Handle_DuplicateDelivery_CascadesOnce(t *testing.
 	require.NoError(t, err)
 
 	metrics := testMetrics(t)
-	c := consumer.NewMemberRemovalConsumer(repo, memberRemovalProcessedEvents, metrics, port.SlogStyleLogger{}, otel.Tracer("test"))
+	c := consumer.NewMemberRemovalConsumer(repo, memberRemovalProcessedEvents, txRunner, metrics, port.SlogStyleLogger{}, otel.Tracer("test"))
 	eventID := uuid.New()
 	msg := memberRemovedEnvelope(t, eventID, tenantID, userID)
 

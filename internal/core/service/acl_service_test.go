@@ -18,7 +18,7 @@ import (
 // ── Fakes ────────────────────────────────────────────────────────────────
 
 type fakeRepo struct {
-	listFn                   func(ctx context.Context, tenantID, tenderID uuid.UUID) ([]domain.TenderACLEntry, error)
+	listFn                   func(ctx context.Context, tenantID, tenderID uuid.UUID, limit, offset int) ([]domain.TenderACLEntry, error)
 	grantFn                  func(ctx context.Context, entry domain.TenderACLEntry) (domain.TenderACLEntry, error)
 	revokeFn                 func(ctx context.Context, tenantID, tenderID, userID uuid.UUID, expectedVersion int64) error
 	findActiveFn             func(ctx context.Context, tenantID, tenderID, userID uuid.UUID) (*domain.TenderACLEntry, error)
@@ -26,8 +26,8 @@ type fakeRepo struct {
 	softDeleteForUserFn      func(ctx context.Context, tenantID, userID uuid.UUID) (int64, error)
 }
 
-func (f *fakeRepo) List(ctx context.Context, tenantID, tenderID uuid.UUID) ([]domain.TenderACLEntry, error) {
-	return f.listFn(ctx, tenantID, tenderID)
+func (f *fakeRepo) List(ctx context.Context, tenantID, tenderID uuid.UUID, limit, offset int) ([]domain.TenderACLEntry, error) {
+	return f.listFn(ctx, tenantID, tenderID, limit, offset)
 }
 func (f *fakeRepo) Grant(ctx context.Context, entry domain.TenderACLEntry) (domain.TenderACLEntry, error) {
 	return f.grantFn(ctx, entry)
@@ -116,26 +116,28 @@ func activeChecker(membershipID uuid.UUID) *fakeChecker {
 func TestService_List_DelegatesToRepo(t *testing.T) {
 	tenantID, tenderID := uuid.New(), uuid.New()
 	want := []domain.TenderACLEntry{{ID: uuid.New(), TenantID: tenantID, TenderID: tenderID}}
-	repo := &fakeRepo{listFn: func(_ context.Context, tt, td uuid.UUID) ([]domain.TenderACLEntry, error) {
+	repo := &fakeRepo{listFn: func(_ context.Context, tt, td uuid.UUID, limit, offset int) ([]domain.TenderACLEntry, error) {
 		assert.Equal(t, tenantID, tt)
 		assert.Equal(t, tenderID, td)
+		assert.Equal(t, 100, limit)
+		assert.Equal(t, 0, offset)
 		return want, nil
 	}}
 	svc := newTestService(repo, &fakeChecker{}, &fakeCache{}, t)
 
-	got, err := svc.List(context.Background(), tenantID, tenderID)
+	got, err := svc.List(context.Background(), tenantID, tenderID, 100, 0)
 	require.NoError(t, err)
 	assert.Equal(t, want, got)
 }
 
 func TestService_List_PropagatesRepoError(t *testing.T) {
 	repoErr := errors.New("db down")
-	repo := &fakeRepo{listFn: func(context.Context, uuid.UUID, uuid.UUID) ([]domain.TenderACLEntry, error) {
+	repo := &fakeRepo{listFn: func(context.Context, uuid.UUID, uuid.UUID, int, int) ([]domain.TenderACLEntry, error) {
 		return nil, repoErr
 	}}
 	svc := newTestService(repo, &fakeChecker{}, &fakeCache{}, t)
 
-	_, err := svc.List(context.Background(), uuid.New(), uuid.New())
+	_, err := svc.List(context.Background(), uuid.New(), uuid.New(), 100, 0)
 	assert.ErrorIs(t, err, repoErr)
 }
 

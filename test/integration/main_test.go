@@ -19,7 +19,6 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/redis/go-redis/v9"
 
-	"github.com/BCBP-SOLUTIONS-FZC-LLC/iam-tender-acl/internal/adapter/inbound/consumer"
 	"github.com/BCBP-SOLUTIONS-FZC-LLC/iam-tender-acl/internal/adapter/outbound/metrics"
 	aclpostgres "github.com/BCBP-SOLUTIONS-FZC-LLC/iam-tender-acl/internal/adapter/outbound/postgres"
 	"github.com/BCBP-SOLUTIONS-FZC-LLC/iam-tender-acl/internal/adapter/outbound/valkey"
@@ -33,9 +32,10 @@ var (
 	adminPool                    *pgxpool.Pool
 	valkeyCache                  *valkey.Cache
 	valkeyClient                 *redis.Client
-	processedEvents              *consumer.ProcessedEvents
-	memberRemovalProcessedEvents *consumer.ProcessedEvents
+	processedEvents              *aclpostgres.ProcessedEvents
+	memberRemovalProcessedEvents *aclpostgres.ProcessedEvents
 	appPgcommonPool              *pgcommon.Pool
+	txRunner                     *aclpostgres.TxRunner
 	// sharedMetrics is constructed once here, not per-test (see testMetrics
 	// in service_test.go) — prometheus.Register (unlike the previous
 	// OTel-meter-backed instruments) rejects a second registration of the
@@ -86,19 +86,12 @@ func runTestMain(m *testing.M) int {
 	defer pool.Close()
 
 	repo = aclpostgres.NewTenderACLRepository(pool)
+	txRunner = aclpostgres.NewTxRunner(pool)
 
-	// A separate pgcommon.Pool on the admin DSN (no GUCProvider — this table
-	// has no RLS), matching production's rawPool in cmd/tender-acl/main.go.
-	// adminPool (the bare *pgxpool.Pool above) stays in use for every other
-	// raw assertion query in this package's test files.
-	processedEventsPool, err := pgcommon.NewPool(ctx, pgcommon.Config{DSN: pg.AdminDSN})
-	if err != nil {
-		fmt.Fprintln(os.Stderr, "connect processed_events pgcommon pool:", err)
-		return 1
-	}
-	defer processedEventsPool.Close()
-	processedEvents = consumer.NewProcessedEvents(processedEventsPool, "tenant_lifecycle_cleanup")
-	memberRemovalProcessedEvents = consumer.NewProcessedEvents(processedEventsPool, "member_removal")
+	// processed_events shares the app pool so cascade + MarkProcessed join
+	// one TxRunner transaction (IDEMP-2), matching production.
+	processedEvents = aclpostgres.NewProcessedEvents(pool, "tenant_lifecycle_cleanup")
+	memberRemovalProcessedEvents = aclpostgres.NewProcessedEvents(pool, "member_removal")
 
 	valkeyClient = valkey.NewClient(valkey.ClientConfig{Addr: valkeyAddr})
 	defer func() { _ = valkeyClient.Close() }()

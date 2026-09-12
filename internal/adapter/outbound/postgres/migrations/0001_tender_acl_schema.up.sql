@@ -73,6 +73,15 @@ CREATE INDEX idx_tae_tenant_tender ON tender_acl_entries (tenant_id, tender_id) 
 CREATE INDEX idx_tae_user          ON tender_acl_entries (tenant_id, user_id)   WHERE deleted_at IS NULL;
 CREATE INDEX idx_tae_membership    ON tender_acl_entries (tenant_membership_id);
 
+-- Non-partial, unlike the three indexes above: the tenant-offboarding
+-- cascade delete (repository.go's CascadeDeleteForTenant, the
+-- TenantMembershipsPurged consumer) deletes ALL of a tenant's rows,
+-- including already-soft-deleted ones retained for audit (LLD §18) — a
+-- partial WHERE deleted_at IS NULL index cannot be used to locate those.
+-- Without this, a high-churn tenant's offboarding forces a sequential scan
+-- under the cascade's write transaction.
+CREATE INDEX idx_tae_tenant_all ON tender_acl_entries (tenant_id);
+
 -- Trigger name per LLD §7.5 verbatim (trg_touch_tae) — differs from
 -- iam-org-membership's trg_touch_tender_acl_entries; the LLD name wins per
 -- "spec is authoritative".

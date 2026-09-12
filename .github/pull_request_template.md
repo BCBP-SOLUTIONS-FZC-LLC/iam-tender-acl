@@ -12,7 +12,7 @@ Provide a clear description of the changes.
 - [ ] Test
 - [ ] Breaking change
 - [ ] New migration
-- [ ] Event contract change (`api/asyncapi.yaml` — the TenantOffboarded schema this service consumes)
+- [ ] Event contract change (`api/asyncapi.yaml` — the `TenantMembershipsPurged`/`MembershipRevoked` schemas this service consumes)
 
 ---
 
@@ -38,7 +38,7 @@ Provide a clear description of the changes.
 
 ### API Contract
 - [ ] Swagger docs regenerated if handler annotations changed (`make swag` — all three files in `docs/swagger/` committed)
-- [ ] `api/asyncapi.yaml` updated if the consumed `TenantOffboarded` payload changed
+- [ ] `api/asyncapi.yaml` updated if either consumed payload (`TenantMembershipsPurged`, `MembershipRevoked`) changed
 
 ### Database / Migrations
 - [ ] New migrations have matching `.up.sql` and `.down.sql`

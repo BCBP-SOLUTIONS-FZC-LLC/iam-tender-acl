@@ -32,6 +32,7 @@ type MemberRemovalMetrics interface {
 	// comment (offboarding_consumer.go); the exact same reasoning applies
 	// here, since this consumer had the exact same silent-skip history.
 	RecordUnexpectedEventType(ctx context.Context, queue, eventType string)
+	RecordProcessedEventsDuplicate(ctx context.Context, consumer string)
 }
 
 // membershipRevokedEventType was "TenantMembershipRemoved" until
@@ -59,29 +60,28 @@ const memberRemovalQueueName = "member-removal-tenderacl-q"
 type MemberRemovalConsumer struct {
 	repo        UserRemovalCascader
 	idempotency IdempotencyStore
+	tx          port.TxRunner
 	metrics     MemberRemovalMetrics
 	logger      port.SlogStyleLogger
 	tracer      trace.Tracer
 }
 
 // NewMemberRemovalConsumer builds a MemberRemovalConsumer.
-func NewMemberRemovalConsumer(repo UserRemovalCascader, idempotency IdempotencyStore, metrics MemberRemovalMetrics, logger port.SlogStyleLogger, tracer trace.Tracer) *MemberRemovalConsumer {
-	return &MemberRemovalConsumer{repo: repo, idempotency: idempotency, metrics: metrics, logger: logger, tracer: tracer}
+func NewMemberRemovalConsumer(repo UserRemovalCascader, idempotency IdempotencyStore, tx port.TxRunner, metrics MemberRemovalMetrics, logger port.SlogStyleLogger, tracer trace.Tracer) *MemberRemovalConsumer {
+	return &MemberRemovalConsumer{repo: repo, idempotency: idempotency, tx: tx, metrics: metrics, logger: logger, tracer: tracer}
 }
 
 // Handle implements the events.Handler function signature. Same
-// idempotency discipline as OffboardingConsumer: checked before doing any
-// work, recorded only after the cascade fully succeeds.
+// idempotency discipline as OffboardingConsumer: skipDuplicate, then one
+// TxRunner transaction for the soft-delete and MarkProcessed (IDEMP-2).
 func (c *MemberRemovalConsumer) Handle(ctx context.Context, env events.Envelope[json.RawMessage]) error {
 	ctx, span := c.tracer.Start(ctx, "MemberRemovalConsumer.Handle")
 	defer span.End()
 
 	if env.Type != "" && env.Type != membershipRevokedEventType {
-		c.metrics.RecordUnexpectedEventType(ctx, memberRemovalQueueName, env.Type)
-		c.logger.WarnContext(ctx, "ignoring unexpected event type on member-removal-tenderacl-q",
-			"event_type", env.Type,
-			"event_id", env.ID,
-		)
+		if err := ackUnknown(ctx, c.tx, c.idempotency, c.metrics, c.logger, memberRemovalQueueName, env); err != nil {
+			return fmt.Errorf("memberremovalconsumer: %w", err)
+		}
 		return nil
 	}
 
@@ -107,7 +107,7 @@ func (c *MemberRemovalConsumer) Handle(ctx context.Context, env events.Envelope[
 		"event_id", eventID.String(),
 	)
 
-	processed, err := c.idempotency.IsProcessed(ctx, eventID)
+	processed, err := skipDuplicate(ctx, c.idempotency, c.metrics, memberRemovalConsumerName, eventID)
 	if err != nil {
 		return fmt.Errorf("memberremovalconsumer: check idempotency for event %s: %w", eventID, err)
 	}
@@ -116,17 +116,21 @@ func (c *MemberRemovalConsumer) Handle(ctx context.Context, env events.Envelope[
 		return nil
 	}
 
-	deleted, err := c.repo.SoftDeleteForUser(ctx, tenantID, userID)
+	gucCtx, err := withTenantGUC(ctx, tenantID)
 	if err != nil {
-		c.metrics.RecordMemberRemovalCascade(ctx, "error")
-		return fmt.Errorf("memberremovalconsumer: soft delete for user %s in tenant %s: %w", userID, tenantID, err)
+		return fmt.Errorf("memberremovalconsumer: bind tenant GUC for %s: %w", tenantID, err)
 	}
-
-	if err := c.idempotency.MarkProcessed(ctx, eventID); err != nil {
-		return fmt.Errorf("memberremovalconsumer: mark event %s processed: %w", eventID, err)
-	}
-
-	c.metrics.RecordMemberRemovalCascade(ctx, "success")
-	logger.InfoContext(ctx, "member removal ACL cascade complete", "deleted", deleted)
-	return nil
+	return c.tx.RunInTx(gucCtx, func(txCtx context.Context) error {
+		deleted, err := c.repo.SoftDeleteForUser(txCtx, tenantID, userID)
+		if err != nil {
+			c.metrics.RecordMemberRemovalCascade(txCtx, "error")
+			return fmt.Errorf("memberremovalconsumer: soft delete for user %s in tenant %s: %w", userID, tenantID, err)
+		}
+		if err := c.idempotency.MarkProcessed(txCtx, eventID); err != nil {
+			return fmt.Errorf("memberremovalconsumer: mark event %s processed: %w", eventID, err)
+		}
+		c.metrics.RecordMemberRemovalCascade(txCtx, "success")
+		logger.InfoContext(txCtx, "member removal ACL cascade complete", "deleted", deleted)
+		return nil
+	})
 }

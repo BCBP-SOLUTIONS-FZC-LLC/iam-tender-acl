@@ -49,7 +49,7 @@ const docTemplate = `{
                         "TenantRoles": []
                     }
                 ],
-                "description": "Every active-or-not entry for a tender, ordered by created_at. Not cached.",
+                "description": "Every active-or-not entry for a tender, ordered by created_at, paginated (default limit 100, max 500). Not cached.",
                 "produces": [
                     "application/json"
                 ],
@@ -73,6 +73,18 @@ const docTemplate = `{
                         "name": "tender_id",
                         "in": "path",
                         "required": true
+                    },
+                    {
+                        "type": "integer",
+                        "description": "Page size (default 100, max 500)",
+                        "name": "limit",
+                        "in": "query"
+                    },
+                    {
+                        "type": "integer",
+                        "description": "Rows to skip (default 0)",
+                        "name": "offset",
+                        "in": "query"
                     }
                 ],
                 "responses": {
@@ -470,6 +482,12 @@ const docTemplate = `{
                     "items": {
                         "$ref": "#/definitions/http.ACLResponse"
                     }
+                },
+                "limit": {
+                    "type": "integer"
+                },
+                "offset": {
+                    "type": "integer"
                 }
             }
         },
